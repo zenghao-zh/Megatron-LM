@@ -76,6 +76,7 @@ def main():
 
     builder = None
     for prefix in sorted(prefixes):
+        print(f"processing file {prefix}")
         if builder is None:
             dataset = IndexedDataset(os.path.join(args.input, prefix), multimodal=args.multimodal)
             builder = IndexedDatasetBuilder(

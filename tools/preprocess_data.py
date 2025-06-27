@@ -214,7 +214,7 @@ def get_args():
                              'is: (workers * partitions) = available CPU cores.'))
     group.add_argument('--partitions', type=int, default=1,
                         help='Number of file partitions')
-    group.add_argument('--log-interval', type=int, default=1000,
+    group.add_argument('--log-interval', type=int, default=100000,
                        help='Interval between progress updates')
     group.add_argument('--keep-sequential-samples', action='store_true',
                        help='Ensure ordering of samples in .jsonl files is '

@@ -12,3 +12,7 @@ local/
 wandb/
 onelogger.log
 onelogger.err
+experiments/
+wandb/
+checkpoints/
+tensorboard/

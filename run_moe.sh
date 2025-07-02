@@ -7,7 +7,7 @@ MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/test
+CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
 DATA_PATH="0.693584 /ssd_1234/haozeng/data/slimpajama/merged_slimpajama 0.306416 /ssd_1234/haozeng/data/starcode/merged_starcode"
@@ -15,8 +15,8 @@ TOKENIZER_MODEL=/ssd_1234/haozeng/data/llama/tokenizer.model
 WANDB_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/wandb
 TENSORBOARD_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/tensorboard
 
-MAX_TRAIN_SAMPLES=51200000
-LR_WARMUP_SAMPLES=$(( 2000 * 2048 ))
+MAX_TRAIN_SAMPLES=38400000
+LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
 
 
 DISTRIBUTED_ARGS=(
@@ -29,10 +29,10 @@ DISTRIBUTED_ARGS=(
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 2048
-    --max-position-embeddings 2048
-    --num-layers 9
-    --hidden-size 960
+    --seq-length 8192
+    --max-position-embeddings 8192
+    --num-layers 8
+    --hidden-size 1024
     --num-attention-heads 8
     --init-method-std 0.006
     --attention-dropout 0.0
@@ -42,7 +42,7 @@ MODEL_ARGS=(
     --swiglu
     --untie-embeddings-and-output-weights
     --group-query-attention
-    --num-query-groups 8
+    --num-query-groups 2
     --no-masked-softmax-fusion
     --position-embedding-type rope
     --rotary-base 10000
@@ -56,7 +56,7 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss # options: aux_loss, sinkhorn, none. Default is aux_loss.
     --moe-router-topk 2
     --moe-router-dtype fp32
-    --moe-aux-loss-coeff 1e-1
+    --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
     --moe-ffn-hidden-size 576
     --moe-shared-expert-intermediate-size 1152 # shared-experts 2
@@ -67,13 +67,13 @@ TRAINING_ARGS=(
     --seed 3407
     --micro-batch-size 8
     --global-batch-size 2048
-    --lr 1.08e-3
+    --lr 3e-4
     --train-samples $MAX_TRAIN_SAMPLES
     --lr-warmup-samples $LR_WARMUP_SAMPLES
-    --lr-decay-style cosine
+    --lr-decay-style constant
     # --lr-decay-multi-step 0.6 0.3 0.1
-    --min-lr 4e-5
-    --lr-warmup-init 1.0e-8
+    --min-lr 1e-8
+    --lr-warmup-init 1e-8
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.95
@@ -84,7 +84,7 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size $GPUS_PER_NODE
+    --tensor-model-parallel-size 1
     # --expert-model-parallel-size 1
     --use-distributed-optimizer
     --sequence-parallel
@@ -101,11 +101,11 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 5000
-    --eval-interval 5000
+    --save-interval 3000
+    --eval-interval 3000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    ## --load $CHECKPOINT_PATH
     --wandb-project megatron-training
     --wandb-exp-name MOE-0.6B
     --wandb-save-dir $WANDB_PATH
@@ -125,3 +125,4 @@ torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${EVAL_AND_LOGGING_ARGS[@]}
+

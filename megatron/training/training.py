@@ -1391,6 +1391,13 @@ def update_balanced_bias(model, u = 0.001):
                 # bias_update = u * e.sign() * (global_num_assigned < 0.05*mean)
                 bias_update = u * e.sign() 
                 module.balanced_bias =  module.balanced_bias + bias_update.to(torch.float32)
+    # 确保所有进程同步
+    torch.distributed.barrier()
+    
+    # 重置所有模块的计数器
+    for module in modules_to_update:
+        module.reset_num_assigned_tokens()
+
     return max_violation/len(modules_to_update)
 
 def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):

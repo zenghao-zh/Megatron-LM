@@ -187,6 +187,22 @@ class TransformerConfig(ModelParallelConfig):
     moe_deepep_num_sms: int = 20
     """Number of SMs to use for DeepEP."""
 
+    act_sparse_training: bool = False
+    """Whether to use sparse training of activation."""
+
+    act_sparse_predictor_hidden_size: int = 64
+    """The hidden size of the predictor."""
+
+    act_sparse_bank_size: int = 64
+    """The bank size of the act sparse training."""
+
+    act_sparse_topk: int = 16
+    """The topk of the act sparse training for each bank."""
+
+    act_sparse_btopk_coeff: float = 0.001
+    """The coefficient of the act sparse training for each bank."""
+
+
     ####################
     # initialization
     ####################

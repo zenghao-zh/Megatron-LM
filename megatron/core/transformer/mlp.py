@@ -40,6 +40,12 @@ class MLPSubmodules:
     linear_fc1: Union[ModuleSpec, type] = None
     linear_fc2: Union[ModuleSpec, type] = None
 
+@dataclass
+class BalancedTopkMLPSubmodules:
+    linear_fc1: Union[ModuleSpec, type] = None
+    linear_fc2: Union[ModuleSpec, type] = None
+    predictor: Union[ModuleSpec, type] = None
+
 
 class MLP(MegatronModule):
     """

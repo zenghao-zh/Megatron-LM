@@ -1135,6 +1135,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['num_layers_in_first_pipeline_stage']= args.decoder_first_pipeline_num_layers
     kw_args['num_layers_in_last_pipeline_stage']= args.decoder_last_pipeline_num_layers
     kw_args['fp8_param'] = args.fp8_param_gather
+    kw_args['act_sparse_training'] = args.act_sparse_training
     if args.swiglu:
         kw_args['activation_func'] = F.silu
         kw_args['gated_linear_unit'] = True
@@ -1978,6 +1979,8 @@ def _add_training_args(parser):
                        'If None, the default backend will be used.')
     group.add_argument('--high-priority-stream-groups', nargs='*', type=str, default=[],
                        help='The communicator group names to use high priority streams.')
+    group.add_argument('--act-sparse-training', action='store_true', default=False,
+                       help='Enable sparse training of activation.')
 
     return parser
 
@@ -2812,6 +2815,16 @@ def _add_moe_args(parser):
     group.add_argument('--moe-upcycling-granularity', type=int, default=1,
                        help='This param sepecifics how many times smaller is the expert hidden size compared with the original dense FFN hidden size. '
                        'For using granular upcycling strategy, please set this param as a positive integer. If this param is set to 1, it means using the default upcycling strategy.')
+    # MoE sparse training arguments, dict
+    group.add_argument('--act-sparse-predictor-hidden-size', type=int, default=64,
+                       help='The hidden size of the predictor.')
+    group.add_argument('--act-sparse-bank-size', type=int, default=64,
+                       help='The bank size of the act sparse training.')
+    group.add_argument('--act-sparse-topk', type=int, default=16,
+                       help='The topk of the act sparse training for each bank.')
+    group.add_argument('--act-sparse-btopk-coeff', type=float, default=0.001,
+                       help='The coefficient of the act sparse training for each bank.')
+    
     return parser
 
 def _add_mla_args(parser):

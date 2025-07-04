@@ -81,6 +81,13 @@ TRAINING_ARGS=(
     --norm-epsilon 1e-6
     --clip-grad 1.0
     --bf16
+
+    ## 激活稀疏训练参数
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 16
+    --act-sparse-btopk-coeff 0.001
 )
 
 MODEL_PARALLEL_ARGS=(

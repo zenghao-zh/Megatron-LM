@@ -15,9 +15,10 @@ from megatron.core.extensions.transformer_engine import (
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
-from megatron.core.transformer.mlp import MLPSubmodules
-from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
+from megatron.core.transformer.mlp import MLPSubmodules, BalancedTopkMLPSubmodules
+from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP, TEGroupedBalancedTopkMLP
 from megatron.core.utils import get_te_version, is_te_min_version
+from megatron.core.transformer.spec_utils import ModuleSpec
 
 
 class TESpecProvider(BackendSpecProvider):
@@ -53,7 +54,7 @@ class TESpecProvider(BackendSpecProvider):
         return TEDotProductAttention
 
     def grouped_mlp_modules(
-        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool, act_sparse_training: bool = False
     ) -> Tuple[type, Optional[MLPSubmodules]]:
         """Which module and submodules to use for grouped mlp"""
         if (
@@ -61,9 +62,21 @@ class TESpecProvider(BackendSpecProvider):
             and TEColumnParallelGroupedLinear is not None
             and not moe_use_legacy_grouped_gemm
         ):
-            return TEGroupedMLP, MLPSubmodules(
-                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
-            )
+            if act_sparse_training:
+                return TEGroupedBalancedTopkMLP, BalancedTopkMLPSubmodules(
+                    linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear, 
+                    predictor=ModuleSpec(
+                        module=TEGroupedMLP, 
+                        submodules=MLPSubmodules(
+                            linear_fc1=TEColumnParallelGroupedLinear, 
+                            linear_fc2=TERowParallelGroupedLinear
+                        )
+                    )
+                )
+            else:
+                return TEGroupedMLP, MLPSubmodules(
+                    linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
+                )
         elif moe_use_grouped_gemm:
             warnings.warn(
                 'The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. '

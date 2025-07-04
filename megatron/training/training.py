@@ -51,6 +51,7 @@ from megatron.training.checkpointing import load_checkpoint
 from megatron.training.checkpointing import save_checkpoint
 from megatron.training.checkpointing import checkpoint_exists
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.experts import GroupedBalancedTopkModule
 from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
@@ -1356,6 +1357,41 @@ def dummy_train_step(data_iterator):
         batch = get_batch_on_this_tp_rank(data_iterator)
         batch = get_batch_on_this_cp_rank(batch)
 
+def update_balanced_bias(model, u = 0.001):
+    max_violation = 0
+    modules_to_update = []
+    
+    def collect_modules(module):
+        for child in module.children():
+            if isinstance(child, GroupedBalancedTopkModule):
+                modules_to_update.append(child)
+            if len(list(child.children())) > 0:
+                collect_modules(child)
+    
+    collect_modules(model)
+    
+    if not modules_to_update:
+        return
+
+    # 所有rank都执行相同的操作
+    for module in modules_to_update:
+        torch.distributed.all_reduce(module.num_assigned_tokens, op=torch.distributed.ReduceOp.SUM)
+        
+        global_num_assigned = module.num_assigned_tokens
+        mean = global_num_assigned.float().mean(dim=1, keepdim=True)
+
+        if mean.sum() != 0:
+
+            max_violation += ((global_num_assigned.max(dim=1, keepdim=True)[0] - mean) / mean).mean().item()
+            # max_violations.append(max_violation)
+            
+            e = mean - global_num_assigned
+            # 关闭amp的autocast，防止balanced_bias被转为bf16
+            with torch.amp.autocast('cuda', enabled=False):
+                # bias_update = u * e.sign() * (global_num_assigned < 0.05*mean)
+                bias_update = u * e.sign() 
+                module.balanced_bias =  module.balanced_bias + bias_update.to(torch.float32)
+    return max_violation/len(modules_to_update)
 
 def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
     """Single training step."""
@@ -1421,6 +1457,13 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
     timers('optimizer').stop()
+
+    # Update bias
+    mean_max_violation = None
+    if config.act_sparse_training:
+        mean_max_violation =update_balanced_bias(model[0], u = config.act_sparse_btopk_coeff)
+        print_rank_0(f"mean_max_violation: {mean_max_violation}")
+
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
     # so we must gather across mp ranks
@@ -1496,8 +1539,9 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             exit_code,
             grad_norm,
             num_zeros_in_grad,
+            mean_max_violation,
         )
-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, mean_max_violation
 
 
 def training_log(
@@ -1512,6 +1556,7 @@ def training_log(
     grad_norm,
     params_norm,
     num_zeros_in_grad,
+    mean_max_violation,
 ):
     """Log training information such as losses, timing, ...."""
     args = get_args()
@@ -1638,6 +1683,12 @@ def training_log(
             writer.add_scalar('params-norm vs samples', params_norm, args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'params-norm': params_norm}, iteration)
+        if mean_max_violation is not None:
+            writer.add_scalar('mean-max-violation', mean_max_violation, iteration)
+            writer.add_scalar('mean-max-violation vs samples', mean_max_violation, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'mean-max-violation': mean_max_violation}, iteration)
+
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
             writer.add_scalar(
@@ -1748,6 +1799,8 @@ def training_log(
             log_string += f' num zeros: {num_zeros_in_grad} |'
         if params_norm is not None:
             log_string += f' params norm: {params_norm:.3f} |'
+        if mean_max_violation is not None:
+            log_string += f' mean max violation: {mean_max_violation:.3f} |'
         log_string += ' number of skipped iterations: {:3d} |'.format(
             total_loss_dict[skipped_iters_key]
         )
@@ -2275,6 +2328,7 @@ def train(
             exit_code,
             grad_norm,
             num_zeros_in_grad,
+            mean_max_violation,
         ) = train_step(
             forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config
         )
@@ -2355,6 +2409,7 @@ def train(
             grad_norm,
             params_norm,
             num_zeros_in_grad,
+            mean_max_violation,
         )
 
         # Evaluation.

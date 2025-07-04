@@ -40,6 +40,7 @@ def get_moe_module_spec_for_backend(
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
+    act_sparse_training: Optional[bool]= False,
 ) -> ModuleSpec:
     """Helper function to get module spec for MoE"""
     assert num_experts is not None
@@ -52,6 +53,7 @@ def get_moe_module_spec_for_backend(
     expert_module, expert_submodule = backend.grouped_mlp_modules(
         moe_grouped_gemm is not None and moe_grouped_gemm,
         moe_use_legacy_grouped_gemm is not None and moe_use_legacy_grouped_gemm,
+        act_sparse_training=act_sparse_training
     )
 
     experts = ModuleSpec(module=expert_module, submodules=expert_submodule)

@@ -867,7 +867,10 @@ class TEGroupedMLP(MegatronModule):
                         if k in sub_sd:
                             sub_sd[k] = apply_swiglu_sharded_factory(sub_sd[k], new_sharded_offsets)
             # Add prefix here to match sequential's keys
-            replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}experts.{name}.')
+            if self.act_sparse_training:
+                replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}.{name}.')
+            else:
+                replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}experts.{name}.') ## TODO: 貌似是个bug，为什么多了个experts
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
 
@@ -955,7 +958,7 @@ class GroupedBalancedTopkModule(MegatronModule):
                 )
 
         return mask, self.num_assigned_tokens
-    
+
     def reset_num_assigned_tokens(self):
         self.num_assigned_tokens.zero_()
 
@@ -1168,7 +1171,7 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                         if k in sub_sd:
                             sub_sd[k] = apply_swiglu_sharded_factory(sub_sd[k], new_sharded_offsets)
             # Add prefix here to match sequential's keys
-            replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}experts.{name}.')
+            replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}{name}.')
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
 

@@ -92,7 +92,7 @@ TRAINING_ARGS=(
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 1
-    # --expert-model-parallel-size 1
+   # --expert-model-parallel-size 1
     --use-distributed-optimizer
     --sequence-parallel
     # --use-torch-fsdp2
@@ -114,7 +114,7 @@ EVAL_AND_LOGGING_ARGS=(
     --save $CHECKPOINT_PATH
     ## --load $CHECKPOINT_PATH
     --wandb-project megatron-training
-    --wandb-exp-name MOE-0.6B
+    --wandb-exp-name MOE-0.6B-btopk-4x
     --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard
     --tensorboard-dir $TENSORBOARD_PATH

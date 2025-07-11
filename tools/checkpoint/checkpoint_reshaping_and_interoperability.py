@@ -535,15 +535,26 @@ def convert_checkpoint_from_megatron_to_transformers(args):
             
             # process attention
             elif "self_attention" in op_name and "linear_qkv" in op_name and weight_or_bias == "weight":
-                q_shape = config.head_dim * config.num_attention_heads
-                k_shape = config.head_dim * config.num_key_value_heads
-                v_shape = config.head_dim * config.num_key_value_heads
+                group_size = config.num_key_value_heads
+                q_shape = config.head_dim * config.num_attention_heads // group_size
+                k_shape = config.head_dim
+                v_shape = config.head_dim
                 # val shape: [qkv_out, in] where qkv_out = q_shape + k_shape + v_shape
                 # Split val into q, k, v along the output dimension (dim=0)
-                q_weight, k_weight, v_weight = torch.split(params, [q_shape, k_shape, v_shape], dim=0)
-                output_state_dict[layer_name + ".self_attn.q_proj.weight"] = q_weight
-                output_state_dict[layer_name + ".self_attn.k_proj.weight"] = k_weight
-                output_state_dict[layer_name + ".self_attn.v_proj.weight"] = v_weight
+                groups = torch.split(params, params.shape[0] // group_size, dim=0)
+                q_weights = []
+                k_weights = []
+                v_weights = []
+                for sub_params in groups:
+                    q_weight, k_weight, v_weight = torch.split(sub_params, [q_shape, k_shape, v_shape], dim=0)
+                    q_weights.append(q_weight)
+                    k_weights.append(k_weight)
+                    v_weights.append(v_weight)
+
+
+                output_state_dict[layer_name + ".self_attn.q_proj.weight"] = torch.concat(q_weights, dim=0)
+                output_state_dict[layer_name + ".self_attn.k_proj.weight"] = torch.concat(k_weights, dim=0)
+                output_state_dict[layer_name + ".self_attn.v_proj.weight"] = torch.concat(v_weights, dim=0)
 
             elif "self_attention" in op_name and "linear_qkv" in op_name and weight_or_bias == "bias":
                 # TODO: implement for bias

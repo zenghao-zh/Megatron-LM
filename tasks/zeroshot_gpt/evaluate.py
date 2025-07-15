@@ -18,7 +18,8 @@ from megatron.core.pipeline_parallel.p2p_communication import recv_forward, send
 from megatron.training.arguments import core_transformer_config_from_args
 from tasks.finetune_utils import build_data_loader
 
-from .datasets import build_dataset
+from .datasets import build_dataset, _LMDataset
+from pretrain_gpt import model_provider
 
 
 def get_model_provider(eval_metric):
@@ -192,12 +193,42 @@ def main():
             args.task))
 
     # Set up model and load checkpoint.
-    model = get_model(get_model_provider(eval_metric), wrap_with_ddp=False)
+    model = get_model(model_provider, wrap_with_ddp=False)
     if args.load is not None:
         _ = load_checkpoint(model, None, None)
 
     assert len(model) == 1, "Above condition should have caught this"
     model = model[0]
+    model.eval()
+    
+    tokenizer = get_tokenizer()
+    entire_data = 'Are you human?'
+    tokenized_data = tokenizer.tokenize(entire_data)
+    num_original_tokens = len(entire_data.strip().split(" "))
+    num_tokenized_tokens = len(tokenized_data)
+    val_dataset = _LMDataset(tokenized_data, args.seq_length, tokenizer.eod,
+                             num_original_tokens, num_tokenized_tokens,
+                             args.overlapping_eval)
+    print_rank_0(' > number of original tokens: {}, number of detokenized '
+                 'tokens: {}'.format(num_original_tokens, num_tokenized_tokens))
+
+    tokens_ = torch.tensor([val_dataset[0]['text'][0:6]]).cuda().contiguous()
+    tokens = tokens_[:, :-1].contiguous()
+
+    attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+        tokens,
+        tokenizer.eod,
+        args.reset_position_ids,
+        args.reset_attention_mask,
+        args.eod_mask_loss)
+
+    output = model(tokens, position_ids, attention_mask)
+
+    print(output)
+
+
+
+                 
 
     # Data stuff.
     dataset = build_dataset(args.task)

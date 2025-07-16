@@ -22,6 +22,7 @@ from megatron.core.dist_checkpointing.mapping import (
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+from megatron.core.fusions.fused_linear_predictor_topk import fused_grouped_linear_predictor_topk_impl
 from megatron.core.jit import jit_fuser
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -913,40 +914,65 @@ class BalancedTopkFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        反向传播逻辑：STE 直接传递梯度
-        grad_output: 上一层传入的梯度
-        """
         mask, = ctx.saved_tensors  # 恢复前向传播保存的掩码
 
         grad_input = grad_output*mask
         return grad_input, None, None, None, None 
     
 class GroupedBalancedTopkModule(MegatronModule):
-    def __init__(self, config, num_local_experts, hidden_size, topk, bank_size):
+    def __init__(self, config, num_local_experts, hidden_size, topk, bank_size, model_comm_pgs=None):
         super().__init__(config)
-        self.register_buffer(f'balanced_bias', torch.zeros(num_local_experts, hidden_size, dtype=torch.float32))
-        self.register_buffer(f'num_assigned_tokens', torch.zeros(num_local_experts,hidden_size, dtype=torch.int))
+        
+        # 获取专家张量并行组信息
+        if model_comm_pgs is not None:
+            self.tp_group = model_comm_pgs.expt_tp
+            tp_size = self.tp_group.size()
+            tp_rank = self.tp_group.rank()
+        else:
+            # 向后兼容：使用全局专家张量并行组
+            self.tp_group = parallel_state.get_expert_tensor_parallel_group()
+            tp_size = parallel_state.get_expert_tensor_parallel_world_size()
+            tp_rank = parallel_state.get_expert_tensor_parallel_rank()
+        
+        # 计算 TP 分片后的 hidden_size
+        self.hidden_size_per_partition = divide(hidden_size, tp_size)
+
+        assert self.hidden_size_per_partition % bank_size == 0, "hidden_size_per_partition must be divisible by bank_size"
+        
+        # 注册 buffer，考虑 TP 分片
+        self.register_buffer('balanced_bias', 
+                           torch.zeros(num_local_experts, self.hidden_size_per_partition, 
+                                     dtype=torch.float32))
+        self.register_buffer('num_assigned_tokens', 
+                           torch.zeros(num_local_experts, self.hidden_size_per_partition, 
+                                     dtype=torch.int))
 
         self.topk = topk
         self.bank_size = bank_size
         self.hidden_size = hidden_size
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
     
     def forward(self, x, tokens_per_expert, k = None):
-                # 创建expert索引映射
+        # 创建expert索引映射
         expert_indices = []
         for expert_idx, num_tokens in enumerate(tokens_per_expert):
             expert_indices.extend([expert_idx] * num_tokens)
         expert_indices = torch.tensor(expert_indices, device=x.device, dtype=torch.long)
 
-        mask = BalancedTopkFunction.apply(x, expert_indices, self.topk if k is None else k, self.bank_size, self.balanced_bias)
-        # mask = torch.nn.functional.normalize(mask.view(-1, self.bank_size), p = 1, dim = -1).view_as(mask)
+        # 确保输入张量的最后一个维度与分片后的 hidden_size 匹配
+        if x.shape[-1] != self.hidden_size_per_partition:
+            raise ValueError(f"Expected input hidden size {self.hidden_size_per_partition} "
+                           f"but got {x.shape[-1]} for TP rank {self.tp_rank}")
+
+        mask = BalancedTopkFunction.apply(x, expert_indices, self.topk if k is None else k, 
+                                        self.bank_size, self.balanced_bias)
+        
         if self.training:  
             with torch.no_grad():
                 # 并行化版本：使用 scatter_add_ 进行分组求和
-                mask_bool = (mask != 0).int()  # [total_tokens, hidden_size]
+                mask_bool = (mask != 0).int()  # [total_tokens, hidden_size_per_partition]
                 
-                # 方法1：使用 scatter_add_ 进行分组求和
                 # 创建每个token对应的专家索引
                 expert_indices_expanded = expert_indices.unsqueeze(1).expand_as(mask_bool)
                 
@@ -961,6 +987,46 @@ class GroupedBalancedTopkModule(MegatronModule):
 
     def reset_num_assigned_tokens(self):
         self.num_assigned_tokens.zero_()
+
+    @expert_dist_ckpt_decorator
+    def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
+        """Maps local expert to global experts for distributed checkpointing."""
+        sharded_state_dict = {}
+        
+        # 获取专家并行组信息
+        ep_size = parallel_state.get_expert_model_parallel_world_size()
+        ep_rank = parallel_state.get_expert_model_parallel_rank()
+        tp_size = self.tp_size
+        tp_rank = self.tp_rank
+        num_global_experts = ep_size * (self.num_assigned_tokens.shape[0] // ep_size)
+        local_expert_indices_offset = ep_rank * (self.num_assigned_tokens.shape[0] // ep_size)
+        
+        prepend_axis_num = len(sharded_offsets)
+        replica_id = (0, tp_rank, 0)  # (PP, TP, DP)
+        
+        # 处理 balanced_bias
+        sharded_state_dict[f'{prefix}balanced_bias'] = ShardedTensor.from_rank_offsets(
+            f'{prefix}balanced_bias',
+            self.balanced_bias,
+            *sharded_offsets,
+            (prepend_axis_num, local_expert_indices_offset, num_global_experts),
+            (prepend_axis_num + 1, tp_rank, tp_size),
+            replica_id=replica_id,
+            prepend_axis_num=prepend_axis_num,
+        )
+        
+        # 处理 num_assigned_tokens
+        sharded_state_dict[f'{prefix}num_assigned_tokens'] = ShardedTensor.from_rank_offsets(
+            f'{prefix}num_assigned_tokens',
+            self.num_assigned_tokens,
+            *sharded_offsets,
+            (prepend_axis_num, local_expert_indices_offset, num_global_experts),
+            (prepend_axis_num + 1, tp_rank, tp_size),
+            replica_id=replica_id,
+            prepend_axis_num=prepend_axis_num,
+        )
+        
+        return sharded_state_dict
 
 # 定义TEGroupedBalancedTopkMLP, 在GroupedMLP的基础上，添加了predictor模块        
 class TEGroupedBalancedTopkMLP(MegatronModule):
@@ -1039,7 +1105,8 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                                                      num_local_experts, 
                                                      self.config.moe_ffn_hidden_size, 
                                                      self.config.act_sparse_topk, 
-                                                     self.config.act_sparse_bank_size
+                                                     self.config.act_sparse_bank_size,
+                                                     model_comm_pgs=model_comm_pgs
                                                     )
 
     def forward(
@@ -1081,9 +1148,12 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
+
         intermediate_parallel, bias_parallel = self.linear_fc1(
             permuted_local_hidden_states, tokens_per_expert
         )
+        pred_masks = torch.sigmoid(self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0])
+        topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.bias_activation_fusion:
@@ -1136,8 +1206,6 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             intermediate_parallel = bias_act_func(
                 intermediate_parallel, bias_parallel, permuted_probs
             )
-            pred_masks = torch.sigmoid(self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0])
-            topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
             intermediate_parallel = intermediate_parallel * topk_masks
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
 

@@ -1323,13 +1323,56 @@ if is_te_min_version("1.9.0.dev0"):
             return super()._sharded_state_dict_grouped(
                 tp_axis_map, prefix, sharded_offsets, metadata
             )
+    class TEDuplicatedGroupedLinear(TEGroupedLinear):
+        """
+        Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
+        to duplicated style (no tensor parallelism).
+        """
 
+        def __init__(
+            self,
+            num_gemms: int,
+            input_size: int,
+            output_size: int,
+            *,
+            config: ModelParallelConfig,
+            init_method: Callable,
+            bias: bool,
+            skip_bias_add: bool,
+            is_expert: bool,
+            tp_comm_buffer_name: Optional[str] = None,
+            tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        ):
+
+            super().__init__(
+                num_gemms=num_gemms,
+                input_size=input_size,
+                output_size=output_size,
+                parallel_mode=None,
+                config=config,
+                init_method=condition_init_method(config, init_method),
+                bias=bias,
+                skip_bias_add=skip_bias_add,
+                is_expert=is_expert,
+                tp_comm_buffer_name=tp_comm_buffer_name,
+                tp_group=tp_group,
+            )
+
+        def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
+            """
+            For each gemm, no sharding (duplicated across TP ranks).
+            Assume sharded_offsets[-1] is the expert parallel offset.
+            """
+            tp_axis_map = {}  # No sharding for duplicated mode
+            return super()._sharded_state_dict_grouped(
+                tp_axis_map, prefix, sharded_offsets, metadata
+            )
 else:
 
     TEGroupedLinear = None  # type: ignore[assignment, misc]
     TEColumnParallelGroupedLinear = None  # type: ignore[assignment, misc]
     TERowParallelGroupedLinear = None  # type: ignore[assignment, misc]
-
+    TEDuplicatedGroupedLinear = None  # type: ignore[assignment, misc]
 
 if is_te_min_version("1.13.0"):
 

@@ -13,6 +13,7 @@ import sys
 from typing import List, Optional
 
 import torch.distributed
+from megatron.core import parallel_state
 from .log_handler import CustomHandler
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
@@ -1373,24 +1374,61 @@ def update_balanced_bias(model, u = 0.001):
     if not modules_to_update:
         return
 
+    # 获取专家张量并行组和专家数据并行组信息
+    expert_tp_group = parallel_state.get_expert_tensor_parallel_group()
+    expert_dp_group = parallel_state.get_expert_data_parallel_group()
+    
     # 所有rank都执行相同的操作
     for module in modules_to_update:
-        torch.distributed.all_reduce(module.num_assigned_tokens, op=torch.distributed.ReduceOp.SUM)
+        # 第一步：在专家张量并行组内收集所有分片的数据
+        if expert_tp_group.size() > 1:
+            # 收集所有TP分片的 num_assigned_tokens
+            gathered_tokens = [
+                torch.zeros_like(module.num_assigned_tokens) 
+                for _ in range(expert_tp_group.size())
+            ]
+            torch.distributed.all_gather(
+                gathered_tokens, 
+                module.num_assigned_tokens, 
+                group=expert_tp_group
+            )
+            # 拼接所有分片的数据，得到完整的统计信息
+            global_num_assigned = torch.cat(gathered_tokens, dim=-1)
+        else:
+            global_num_assigned = module.num_assigned_tokens
         
-        global_num_assigned = module.num_assigned_tokens
+        # 第二步：在专家数据并行组内聚合（如果需要）
+        if expert_dp_group.size() > 1:
+            torch.distributed.all_reduce(
+                global_num_assigned, 
+                op=torch.distributed.ReduceOp.SUM,
+                group=expert_dp_group
+            )
+        
+        # 基于完整的统计信息计算平衡偏差
         mean = global_num_assigned.float().mean(dim=1, keepdim=True)
 
         if mean.sum() != 0:
-
             max_violation += ((global_num_assigned.max(dim=1, keepdim=True)[0] - mean) / mean).mean().item()
-            # max_violations.append(max_violation)
             
             e = mean - global_num_assigned
             # 关闭amp的autocast，防止balanced_bias被转为bf16
             with torch.amp.autocast('cuda', enabled=False):
-                # bias_update = u * e.sign() * (global_num_assigned < 0.05*mean)
                 bias_update = u * e.sign() 
-                module.balanced_bias =  module.balanced_bias + bias_update.to(torch.float32)
+                
+                # 将偏差应用到当前GPU对应的分片上
+                if expert_tp_group.size() > 1:
+                    # 从完整的偏差中提取当前分片对应的部分
+                    tp_rank = expert_tp_group.rank()
+                    hidden_size_per_partition = module.hidden_size_per_partition
+                    start_idx = tp_rank * hidden_size_per_partition
+                    end_idx = (tp_rank + 1) * hidden_size_per_partition
+                    local_bias_update = bias_update[:, start_idx:end_idx]
+                else:
+                    local_bias_update = bias_update
+                
+                module.balanced_bias = module.balanced_bias + local_bias_update.to(torch.float32)
+    
     # 确保所有进程同步
     torch.distributed.barrier()
     

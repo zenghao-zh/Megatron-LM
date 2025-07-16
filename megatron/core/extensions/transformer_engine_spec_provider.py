@@ -11,6 +11,7 @@ from megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelGroupedLinear,
     TERowParallelLinear,
+    TEDuplicatedGroupedLinear
 )
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.backends import BackendSpecProvider
@@ -68,8 +69,8 @@ class TESpecProvider(BackendSpecProvider):
                     predictor=ModuleSpec(
                         module=TEGroupedMLP, 
                         submodules=MLPSubmodules(
-                            linear_fc1=TEColumnParallelGroupedLinear, 
-                            linear_fc2=TERowParallelGroupedLinear
+                            linear_fc1=TEDuplicatedGroupedLinear,
+                            linear_fc2=TEColumnParallelGroupedLinear
                         )
                     )
                 )

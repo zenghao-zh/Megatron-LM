@@ -22,7 +22,6 @@ from megatron.core.dist_checkpointing.mapping import (
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
-from megatron.core.fusions.fused_linear_predictor_topk import fused_grouped_linear_predictor_topk_impl
 from megatron.core.jit import jit_fuser
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,

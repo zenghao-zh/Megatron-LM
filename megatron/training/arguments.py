@@ -26,8 +26,8 @@ from megatron.core.transformer.pipeline_parallel_layer_layout import PipelinePar
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.heterogeneous.heterogeneous_config import (
     HeterogeneousTransformerConfig,
-    MLPConfig,
 )
+from megatron.core.transformer.identity_op import identity
 from megatron.core.utils import (
     get_torch_version,
     is_torch_min_version,
@@ -1136,8 +1136,14 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['num_layers_in_last_pipeline_stage']= args.decoder_last_pipeline_num_layers
     kw_args['fp8_param'] = args.fp8_param_gather
     kw_args['act_sparse_training'] = args.act_sparse_training
-    if args.swiglu:
+    if args.swiglu and not args.act_sparse_swiglu_without_silu:
         kw_args['activation_func'] = F.silu
+        kw_args['no_shared_expert_activation_func'] = F.silu
+        kw_args['gated_linear_unit'] = True
+        kw_args['bias_activation_fusion'] = args.bias_swiglu_fusion
+    elif args.swiglu and args.act_sparse_swiglu_without_silu:
+        kw_args['activation_func'] = F.silu
+        kw_args['no_shared_expert_activation_func'] = identity
         kw_args['gated_linear_unit'] = True
         kw_args['bias_activation_fusion'] = args.bias_swiglu_fusion
     else:
@@ -1448,6 +1454,8 @@ def _add_network_size_args(parser):
                        help='Use squared relu activation instead of default gelu')
     group.add_argument('--swiglu', action='store_true',
                        help='Use gated linear units and SiLU activation instead of default gelu')
+    group.add_argument('--act-sparse-swiglu-without-silu', action='store_true',
+                       help='Use gated linear units and without SiLU activation')
     group.add_argument('--onnx-safe', type=bool, required=False,
                        help='Use workarounds for known problems with '
                        'Torch ONNX exporter')

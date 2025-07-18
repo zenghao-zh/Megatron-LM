@@ -153,6 +153,23 @@ megatron_to_transformers = {
 transformers_to_megatron = {v[1:-1]: k for k, v in megatron_to_transformers.items()}
 
 tensor_parallel_params = [
+    "self_attention.linear_proj.weight",
+    "self_attention.linear_proj.bias",
+    "self_attention.linear_qkv.weight",
+    "self_attention.linear_qkv.bias",
+    "mlp.experts.linear_fc1.weight",
+    "mlp.experts.linear_fc1.bias",
+    "mlp.experts.linear_fc2.weight",
+    "mlp.experts.linear_fc2.bias",
+    "mlp.experts.predictors.linear_fc2.weight",
+    "mlp.experts.predictors.linear_fc2.bias",
+    "mlp.shared_experts.linear_fc1.weight",
+    "mlp.shared_experts.linear_fc1.bias",
+    "mlp.shared_experts.linear_fc2.weight",
+    "mlp.shared_experts.linear_fc2.bias",
+    "mlp.experts.topk_modules.balanced_bias",
+    "mlp.experts.topk_modules.num_assigned_tokens",
+
     # # megatron-lm layers to merge across tp ranks
     # "self_attention.query_key_value.weight",
     # "self_attention.query_key_value.bias",
@@ -345,6 +362,12 @@ def extract_weight_number(weight_or_bias):
         return int(weight_or_bias[6:])  # "weight" 长度是6，所以从索引6开始
     return None
 
+def extract_weight_name(weight_or_bias):
+    """提取 weight 后面的数字"""
+    if is_weight_with_number(weight_or_bias):
+        return weight_or_bias[:6]  # "weight" 长度是6，所以提取到6
+    return weight_or_bias
+
 
 def convert_checkpoint_from_megatron_to_transformers(args):
     """
@@ -510,15 +533,15 @@ def convert_checkpoint_from_megatron_to_transformers(args):
 
             layer_name = f"model.layers.{layer_idx}"
 
-            if op_name + "." + weight_or_bias not in tensor_parallel_params:
+            if op_name + "." + extract_weight_name(weight_or_bias) not in tensor_parallel_params:
                 params = val.to(dtype)
             else:
                 ## TODO: implement tensor parallel for moe
-                dim = 1 if op_name in ["self_attention.dense", "mlp.dense_4h_to_h", "attention.dense"] else 0
+                dim = 1 if op_name in ["self_attention.linear_proj", "mlp.experts.linear_fc2", "mlp.shared_experts.linear_fc2", "mlp.experts.topk_modules"] else 0
                 params = torch.cat(
                     [val]
                     + [
-                        get_element_from_dict_by_path(tp_state_dicts[tp_rank], f"{path}")[key]
+                        tp_state_dicts[tp_rank]["model"][key]
                         for tp_rank in range(1, tp_size)
                     ],
                     dim=dim,

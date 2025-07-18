@@ -12,6 +12,7 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.quantization.quant_config import RecipeConfig
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.core.transformer.identity_op import identity
 
 from ..model_parallel_config import ModelParallelConfig
 from ..utils import (
@@ -144,6 +145,9 @@ class TransformerConfig(ModelParallelConfig):
 
     activation_func: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
+
+    no_shared_expert_activation_func: Callable = F.gelu
+    """Activation function to use for the non-linearity in the MLP of the non-shared expert."""
 
     activation_func_fp8_input_store: bool = False
     """Store the input of MLP activation function in FP8 for backprop to save memory.
@@ -1051,7 +1055,7 @@ class TransformerConfig(ModelParallelConfig):
             self.attention_softmax_in_fp32 = True
 
         if self.bias_activation_fusion:
-            if self.activation_func not in [F.gelu, F.silu]:
+            if self.activation_func not in [F.gelu, F.silu, identity]:
                 raise ValueError(
                     "When bias_activation_fusion is True, activation function should be either "
                     "gelu or swiglu"

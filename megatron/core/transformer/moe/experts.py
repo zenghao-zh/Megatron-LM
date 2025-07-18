@@ -21,7 +21,7 @@ from megatron.core.dist_checkpointing.mapping import (
 )
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_align_size
-from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl, weighted_bias_swiglu_without_silu_impl
 from megatron.core.jit import jit_fuser
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -29,6 +29,7 @@ from megatron.core.tensor_parallel.layers import (
 )
 from megatron.core.tensor_parallel.utils import divide
 from megatron.core.transformer.mlp import MLP, MLPSubmodules, BalancedTopkMLPSubmodules, apply_swiglu_sharded_factory
+from megatron.core.transformer.identity_op import identity
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.moe.moe_utils import ModelCommProcessGroups
@@ -987,45 +988,6 @@ class GroupedBalancedTopkModule(MegatronModule):
     def reset_num_assigned_tokens(self):
         self.num_assigned_tokens.zero_()
 
-    @expert_dist_ckpt_decorator
-    def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
-        """Maps local expert to global experts for distributed checkpointing."""
-        sharded_state_dict = {}
-        
-        # 获取专家并行组信息
-        ep_size = parallel_state.get_expert_model_parallel_world_size()
-        ep_rank = parallel_state.get_expert_model_parallel_rank()
-        tp_size = self.tp_size
-        tp_rank = self.tp_rank
-        num_global_experts = ep_size * (self.num_assigned_tokens.shape[0] // ep_size)
-        local_expert_indices_offset = ep_rank * (self.num_assigned_tokens.shape[0] // ep_size)
-        
-        prepend_axis_num = len(sharded_offsets)
-        replica_id = (0, tp_rank, 0)  # (PP, TP, DP)
-        
-        # 处理 balanced_bias
-        sharded_state_dict[f'{prefix}balanced_bias'] = ShardedTensor.from_rank_offsets(
-            f'{prefix}balanced_bias',
-            self.balanced_bias,
-            *sharded_offsets,
-            (prepend_axis_num, local_expert_indices_offset, num_global_experts),
-            (prepend_axis_num + 1, tp_rank, tp_size),
-            replica_id=replica_id,
-            prepend_axis_num=prepend_axis_num,
-        )
-        
-        # 处理 num_assigned_tokens
-        sharded_state_dict[f'{prefix}num_assigned_tokens'] = ShardedTensor.from_rank_offsets(
-            f'{prefix}num_assigned_tokens',
-            self.num_assigned_tokens,
-            *sharded_offsets,
-            (prepend_axis_num, local_expert_indices_offset, num_global_experts),
-            (prepend_axis_num + 1, tp_rank, tp_size),
-            replica_id=replica_id,
-            prepend_axis_num=prepend_axis_num,
-        )
-        
-        return sharded_state_dict
 
 # 定义TEGroupedBalancedTopkMLP, 在GroupedMLP的基础上，添加了predictor模块        
 class TEGroupedBalancedTopkMLP(MegatronModule):
@@ -1065,7 +1027,7 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             tp_group=parallel_state.get_expert_tensor_parallel_group(),
         )
 
-        self.activation_func = self.config.activation_func
+        self.activation_func = self.config.no_shared_expert_activation_func
         self.activation_recompute = (
             self.config.recompute_granularity == 'selective'
             and "moe_act" in self.config.recompute_modules
@@ -1159,6 +1121,13 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                 if self.activation_func == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
                     intermediate_parallel = weighted_bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                    )
+                elif self.activation_func == identity and self.config.gated_linear_unit:
+                    intermediate_parallel = weighted_bias_swiglu_without_silu_impl(
                         intermediate_parallel,
                         bias_parallel,
                         permuted_probs,

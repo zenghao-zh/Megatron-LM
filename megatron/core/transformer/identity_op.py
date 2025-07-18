@@ -26,3 +26,6 @@ class IdentityFuncOp(IdentityOp):
 
     def forward(self, *args, **kwargs):
         return super().forward
+
+def identity(x):
+    return x

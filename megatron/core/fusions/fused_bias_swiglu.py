@@ -25,6 +25,20 @@ def swiglu(y):
     y_1, y_2 = torch.chunk(y, 2, -1)
     return F.silu(y_1) * y_2
 
+@jit_fuser
+def swiglu_without_silu(y):
+    """Performs SwiGLU (Swish-Gated Linear Unit) activation function.
+
+    Args:
+        y (torch.Tensor): Input tensor to be split into two halves along the last dimension.
+
+    Returns:
+        torch.Tensor: Result of SwiGLU activation: SiLU(y1) * y2, where y1, y2 are the split halves.
+    """
+    y_1, y_2 = torch.chunk(y, 2, -1)
+    return y_1 * y_2
+
+
 
 @jit_fuser
 def bias_swiglu(y, bias):
@@ -48,6 +62,23 @@ def weighted_swiglu(y, weights):
     return res.to(dtype)
 
 
+@jit_fuser
+def weighted_swiglu_without_silu(y, weights):
+    dtype = y.dtype
+    res = swiglu_without_silu(y) * weights
+    return res.to(dtype)
+
+@jit_fuser
+def weighted_swiglu_without_silu_back(g, y, weights):
+    input_dtype = y.dtype
+    w_dtype = weights.dtype
+    input_grad = swiglu_without_silu_back(g * weights, y)
+    # precision of w may be higher than y and g, so we need to cast g to w_dtype
+    weights_grad = swiglu_without_silu(y) * g.to(w_dtype)
+    weights_grad = torch.sum(weights_grad, dim=-1, keepdim=True)
+    return input_grad.to(input_dtype), weights_grad.to(w_dtype)
+
+
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
@@ -68,6 +99,12 @@ def swiglu_back(g, y):
         (g * torch.sigmoid(y_1) * (1 + y_1 * (1 - torch.sigmoid(y_1))) * y_2, g * F.silu(y_1)), -1
     )
 
+@jit_fuser
+def swiglu_without_silu_back(g, y):
+    y_1, y_2 = torch.chunk(y, 2, -1)
+    return torch.cat(
+        (g * y_2, g * y_1), -1
+    )
 
 @jit_fuser
 def bias_swiglu_back(g, y, bias):
@@ -205,6 +242,23 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
         tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
         return tmp, wgrad, None
 
+class WeightedSwiGLUWithoutSiluFunction(torch.autograd.Function):
+    @staticmethod
+    # bias is an optional argument
+    def forward(ctx, input, weights, fp8_input_store):
+        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input
+        ctx.save_for_backward(input_for_backward, weights)
+        ctx.ori_input_dtype = input.dtype
+        ctx.fp8_input_store = fp8_input_store
+        return weighted_swiglu_without_silu(input, weights)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weights = ctx.saved_tensors
+        input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
+        tmp, wgrad = weighted_swiglu_without_silu_back(grad_output, input, weights)
+        return tmp, wgrad, None
+
 
 def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False):
     """Implementation of biased SwiGLU that handles different input shapes.
@@ -247,6 +301,20 @@ def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False):
         raise NotImplementedError("Bias is not supported for weighted swiglu fusion")
     else:
         output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store)
+
+    return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
+
+def weighted_bias_swiglu_without_silu_impl(input, bias, weights, fp8_input_store=False):
+    """
+    Token-wise-weighted bias swiglu fusion.
+    """
+    ori_shape = input.shape
+    assert len(ori_shape) in [2, 3]
+    input = input.view(-1, ori_shape[-1])
+    if bias is not None:
+        raise NotImplementedError("Bias is not supported for weighted swiglu fusion")
+    else:
+        output = WeightedSwiGLUWithoutSiluFunction.apply(input, weights, fp8_input_store)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 

@@ -363,7 +363,7 @@ def extract_weight_number(weight_or_bias):
     return None
 
 def extract_weight_name(weight_or_bias):
-    """提取 weight 后面的数字"""
+    """提取 weight"""
     if is_weight_with_number(weight_or_bias):
         return weight_or_bias[:6]  # "weight" 长度是6，所以提取到6
     return weight_or_bias

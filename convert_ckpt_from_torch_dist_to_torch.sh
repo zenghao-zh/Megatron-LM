@@ -1,14 +1,14 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=2
 MASTER_ADDR=localhost
 MASTER_PORT=6002
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline
-CHECKPOINT_PATH_TORCH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch
+CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test
+CHECKPOINT_PATH_TORCH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test-torch
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
 DATA_PATH="0.693584 /ssd_1234/haozeng/data/slimpajama/merged_slimpajama 0.306416 /ssd_1234/haozeng/data/starcode/merged_starcode"
@@ -59,7 +59,7 @@ MOE_ARGS=(
     --moe-router-dtype fp32
     --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
-    --moe-ffn-hidden-size 576
+    --moe-ffn-hidden-size 512
     --moe-shared-expert-intermediate-size 1152 # shared-experts 2
     #--moe-expert-capacity-factor 1.2
 )
@@ -84,16 +84,17 @@ TRAINING_ARGS=(
     --bf16
 
     ## 激活稀疏训练参数
-    # --act-sparse-training
-    # --act-sparse-predictor-hidden-size 64
-    # --act-sparse-bank-size 64
-    # --act-sparse-topk 16
-    # --act-sparse-btopk-coeff 0.001
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 16
+    --act-sparse-btopk-coeff 0.001
+    # --act-sparse-swiglu-without-silu
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-   # --expert-model-parallel-size 1
+    # --tensor-model-parallel-size 1
+    --expert-model-parallel-size 2
     --use-distributed-optimizer
     --sequence-parallel
     # --use-torch-fsdp2
@@ -121,6 +122,7 @@ EVAL_AND_LOGGING_ARGS=(
     --tensorboard-dir $TENSORBOARD_PATH
     --ckpt-convert-format torch
     --ckpt-convert-save $CHECKPOINT_PATH_TORCH
+    # --ckpt-step 15000
     # --wandb-project benchmark_training
     # --wandb-exp-name moe8x2-7B
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH

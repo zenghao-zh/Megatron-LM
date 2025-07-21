@@ -23,6 +23,7 @@ import types
 # Add the tools directory to sys.path to import hf_moe
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
+from PIL.Image import new
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from packaging import version
@@ -304,7 +305,7 @@ def merge_transformers_sharded_states(path, num_checkpoints):
     return state_dict
 
 
-def get_megatron_sharded_states(args, tp_size, pp_size, pp_rank):
+def get_megatron_sharded_states(args, tp_size, pp_size, pp_rank, ep_size, ep_rank):
     """
     Get sharded checkpoints from NVIDIA Megatron-LM checkpoint based on the provided tensor parallel size, pipeline
     parallel size and pipeline parallel rank.
@@ -314,10 +315,14 @@ def get_megatron_sharded_states(args, tp_size, pp_size, pp_rank):
         tp_size (int): the tensor parallel size
         pp_size (int): the pipeline parallel size
         pp_rank (int): the pipeline parallel rank
+        ep_size (int): the expert parallel size
+        ep_rank (int): the expert parallel rank
     """
     tp_state_dicts = []
     for i in range(tp_size):
         sub_dir_name = f"mp_rank_{i:02d}" if pp_size == 1 else f"mp_rank_{i:02d}_{pp_rank:03d}"
+        if ep_size > 1:
+            sub_dir_name += f"_{ep_rank:03d}"
         for checkpoint_name in ["model_optim_rng.pt", "model_rng.pt"]:
             checkpoint_path = os.path.join(args.load_path, sub_dir_name, checkpoint_name)
             if os.path.isfile(checkpoint_path):
@@ -368,6 +373,31 @@ def extract_weight_name(weight_or_bias):
         return weight_or_bias[:6]  # "weight" 长度是6，所以提取到6
     return weight_or_bias
 
+
+def get_merged_ep_state_dicts(ep_state_dicts, tp_rank, num_local_experts):
+    """
+    Merge expert parallel state dictionaries into a single state dictionary.
+    """
+    ep_size = len(ep_state_dicts)
+    if ep_size > 1:
+        for ep_rank in range(1, ep_size):
+            for key, val in ep_state_dicts[ep_rank][tp_rank]['model'].items():
+                if 'mlp.experts.linear_fc' in key or 'mlp.experts.predictors.linear_fc' in key:
+                    if 'weight' not in key and 'bias' not in key:
+                        continue
+                    subkeys = key.split('.')
+                    weight_or_bias = subkeys[-1]
+                    weight_or_bias_name = extract_weight_name(weight_or_bias)
+                    expert_idx = extract_weight_number(weight_or_bias)+num_local_experts*ep_rank
+                    subkeys[-1] = weight_or_bias_name+str(expert_idx)
+                    new_key = '.'.join(subkeys)
+                    ep_state_dicts[0][tp_rank]['model'][new_key] = val
+                elif 'mlp.experts.topk_modules' in key:
+                    ep_state_dicts[0][tp_rank]['model'][key] = torch.cat([ep_state_dicts[0][tp_rank]['model'][key], val], dim=0)
+        ## 对ep_state_dicts[0][tp_rank]['model']按key排序
+        ## ep_state_dicts[0][tp_rank]['model'] = dict(sorted(ep_state_dicts[0][tp_rank]['model'].items(), key=lambda x: x[0]))
+                    
+    return ep_state_dicts[0][tp_rank]
 
 def convert_checkpoint_from_megatron_to_transformers(args):
     """
@@ -471,6 +501,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
     checkpoint_version = state_dict.get("checkpoint_version", 0.0)
     tp_size = megatron_args.tensor_model_parallel_size
     pp_size = megatron_args.pipeline_model_parallel_size
+    ep_size = megatron_args.expert_model_parallel_size
     dtype = torch.bfloat16
     # The regex to extract layer names.
     # layer_re = re.compile(r"decoder\.layers\.(\d+)\.(.+)\.(weight)(\d*)$")
@@ -481,7 +512,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
 
     # Embeddings
     print("Converting embeddings")
-    tp_state_dicts = get_megatron_sharded_states(args, tp_size, pp_size, 0)
+    tp_state_dicts = get_megatron_sharded_states(args, tp_size, pp_size, 0, ep_size, 0)
 
     # Convert and store the position embeddings.
     # position_embeddings = get_element_from_dict_by_path(
@@ -509,15 +540,18 @@ def convert_checkpoint_from_megatron_to_transformers(args):
     for pp_rank in range(pp_size):
         if pp_size > 0:
             print(f"Converting pipeline parallel rank {pp_rank}")
-            tp_state_dicts = get_megatron_sharded_states(args, tp_size, pp_size, pp_rank)
-
-        # The transformer.
-        path = (
-            "model.language_model.transformer"
-            if "transformer" in get_element_from_dict_by_path(tp_state_dicts[0], "model.language_model").keys()
-            else "model.language_model.encoder"
-        )
-
+            if ep_size > 1:
+                ep_state_dicts = []
+                for ep_rank in range(ep_size):
+                    ep_tp_state_dicts = get_megatron_sharded_states(args, tp_size, pp_size, pp_rank, ep_size, ep_rank)
+                    ep_state_dicts.append(ep_tp_state_dicts)
+                tp_state_dicts = []
+                for tp_rank in range(tp_size):
+                    tp_state_dicts.append(get_merged_ep_state_dicts(ep_state_dicts, tp_rank, megatron_args.num_experts//ep_size))
+                
+            else:
+                tp_state_dicts = get_megatron_sharded_states(args, tp_size, pp_size, pp_rank, 1, 0)
+                
         for key, val in get_element_from_dict_by_layer_re(tp_state_dicts[0]["model"], layer_re).items():
             print("processing key: ", key)
             m = layer_re.match(key)
@@ -1044,4 +1078,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()

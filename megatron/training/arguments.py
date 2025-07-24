@@ -1136,6 +1136,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['num_layers_in_last_pipeline_stage']= args.decoder_last_pipeline_num_layers
     kw_args['fp8_param'] = args.fp8_param_gather
     kw_args['act_sparse_training'] = args.act_sparse_training
+    kw_args['act_sparse_enable_fused_balanced_topk'] = args.act_sparse_enable_fused_balanced_topk
     if args.swiglu and not args.act_sparse_swiglu_without_silu:
         kw_args['activation_func'] = F.silu
         kw_args['no_shared_expert_activation_func'] = F.silu
@@ -1989,6 +1990,10 @@ def _add_training_args(parser):
                        help='The communicator group names to use high priority streams.')
     group.add_argument('--act-sparse-training', action='store_true', default=False,
                        help='Enable sparse training of activation.')
+    group.add_argument('--act-sparse-enable-fused-balanced-topk', action='store_true', default=False,
+                       help='Enable fused balanced topk for sparse training of activation.')
+    group.add_argument('--act-sparse-enable-parallel-compute', action='store_true', default=False,
+                       help='Enable parallel compute for balanced topk and fc1_linear.')
 
     return parser
 

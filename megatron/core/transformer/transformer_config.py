@@ -206,6 +206,12 @@ class TransformerConfig(ModelParallelConfig):
     act_sparse_btopk_coeff: float = 0.001
     """The coefficient of the act sparse training for each bank."""
 
+    act_sparse_enable_fused_balanced_topk: bool = False
+    """Whether to use fused balanced topk for sparse training of activation."""
+
+    act_sparse_enable_parallel_compute: bool = False
+    """Whether to use parallel compute for balanced topk and fc1_linear."""
+
 
     ####################
     # initialization

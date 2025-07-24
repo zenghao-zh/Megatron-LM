@@ -22,6 +22,7 @@ from megatron.core.dist_checkpointing.mapping import (
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl, weighted_bias_swiglu_without_silu_impl
+from megatron.core.fusions.fused_balanced_topk import FusedBalancedTopkFunction
 from megatron.core.jit import jit_fuser
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -93,6 +94,30 @@ def expert_dist_ckpt_decorator(func):
 
     return wrapper
 
+class ParallelComputeManager:
+    """管理预测器和主路径的并行计算"""
+    
+    def __init__(self):
+        self.predictor_stream = torch.cuda.Stream()
+        self.main_stream = torch.cuda.current_stream()
+    
+    def parallel_forward(self, predictor_func, main_func, 
+                        predictor_args, main_args):
+        """并行执行预测器和主路径计算"""
+        predictor_result = None
+        main_result = None
+        
+        # 预测器计算在独立stream中执行
+        with torch.cuda.stream(self.predictor_stream):
+            predictor_result = predictor_func(*predictor_args)
+        
+        # 主路径计算在当前stream中执行
+        main_result = main_func(*main_args)
+        
+        # 同步所有streams
+        torch.cuda.synchronize()
+        
+        return predictor_result, main_result
 
 class GroupedMLP(MegatronModule):
     """An efficient implementation of the Experts layer using GroupedGEMM.
@@ -877,19 +902,12 @@ class TEGroupedMLP(MegatronModule):
 
 class BalancedTopkFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, expert_indices, k, bank_size, bias):
-
-        # 找到的Top-K阈值
-        # H = input.shape[-1]
-        # x = input.view(-1, H//bank_size, bank_size)
-        # if ctx.needs_input_grad[0]:
-        #     _, topk_indices = (x.abs()+bias.view(-1, bank_size)).topk(k, dim=-1)
-        # else:
-        #     _, topk_indices = (x.abs()+bias.view(-1, bank_size)).topk(k, dim=-1)
-        # mask = torch.zeros_like(x, dtype= x.dtype)
-        # mask = mask.scatter(-1, topk_indices, 1).view_as(input)
-        # output = input*mask
-
+    def forward(ctx, input, tokens_per_expert, k, bank_size, bias, num_assigned_tokens, training = True):
+        
+        expert_indices = torch.repeat_interleave(
+            torch.arange(len(tokens_per_expert), device=input.device),
+            torch.tensor(tokens_per_expert, device=input.device)
+        )
         # ctx.save_for_backward(mask)
         H = input.shape[-1]
         
@@ -910,6 +928,21 @@ class BalancedTopkFunction(torch.autograd.Function):
         output = input * mask
         
         ctx.save_for_backward(mask)
+
+        if training:  
+            with torch.no_grad():
+                # 并行化版本：使用 scatter_add_ 进行分组求和
+                mask_bool = (mask != 0).int()  # [total_tokens, hidden_size_per_partition]
+                
+                # 创建每个token对应的专家索引
+                expert_indices_expanded = expert_indices.unsqueeze(1).expand_as(mask_bool)
+                
+                # 按专家分组求和
+                num_assigned_tokens.scatter_add_(
+                    0,  # 在专家维度上求和
+                    expert_indices_expanded, 
+                    mask_bool
+                )
         return output
 
     @staticmethod
@@ -917,7 +950,7 @@ class BalancedTopkFunction(torch.autograd.Function):
         mask, = ctx.saved_tensors  # 恢复前向传播保存的掩码
 
         grad_input = grad_output*mask
-        return grad_input, None, None, None, None 
+        return grad_input, None, None, None, None, None, None
     
 class GroupedBalancedTopkModule(MegatronModule):
     def __init__(self, config, num_local_experts, hidden_size, topk, bank_size, model_comm_pgs=None):
@@ -952,36 +985,24 @@ class GroupedBalancedTopkModule(MegatronModule):
         self.hidden_size = hidden_size
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+        self.act_sparse_enable_fused_balanced_topk = getattr(config, 'act_sparse_enable_fused_balanced_topk', False)
+
     
     def forward(self, x, tokens_per_expert, k = None):
-        # 创建expert索引映射
-        expert_indices = []
-        for expert_idx, num_tokens in enumerate(tokens_per_expert):
-            expert_indices.extend([expert_idx] * num_tokens)
-        expert_indices = torch.tensor(expert_indices, device=x.device, dtype=torch.long)
 
         # 确保输入张量的最后一个维度与分片后的 hidden_size 匹配
         if x.shape[-1] != self.hidden_size_per_partition:
             raise ValueError(f"Expected input hidden size {self.hidden_size_per_partition} "
                            f"but got {x.shape[-1]} for TP rank {self.tp_rank}")
 
-        mask = BalancedTopkFunction.apply(x, expert_indices, self.topk if k is None else k, 
-                                        self.bank_size, self.balanced_bias)
+        if self.act_sparse_enable_fused_balanced_topk:
+            mask = FusedBalancedTopkFunction.apply(x, tokens_per_expert, self.topk if k is None else k, 
+                                        self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
+        else:
+            mask = BalancedTopkFunction.apply(x, tokens_per_expert, self.topk if k is None else k, 
+                                        self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
         
-        if self.training:  
-            with torch.no_grad():
-                # 并行化版本：使用 scatter_add_ 进行分组求和
-                mask_bool = (mask != 0).int()  # [total_tokens, hidden_size_per_partition]
-                
-                # 创建每个token对应的专家索引
-                expert_indices_expanded = expert_indices.unsqueeze(1).expand_as(mask_bool)
-                
-                # 按专家分组求和
-                self.num_assigned_tokens.scatter_add_(
-                    0,  # 在专家维度上求和
-                    expert_indices_expanded, 
-                    mask_bool
-                )
+            
 
         return mask, self.num_assigned_tokens
 
@@ -1070,6 +1091,8 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                                                      model_comm_pgs=model_comm_pgs
                                                     )
 
+        self.parallel_manager = ParallelComputeManager()
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -1109,12 +1132,6 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-
-        intermediate_parallel, bias_parallel = self.linear_fc1(
-            permuted_local_hidden_states, tokens_per_expert
-        )
-        pred_masks = torch.sigmoid(self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0])
-        topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.bias_activation_fusion:
@@ -1171,9 +1188,24 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         else:
-            intermediate_parallel = bias_act_func(
-                intermediate_parallel, bias_parallel, permuted_probs
-            )
+            if hasattr(self.config, 'act_sparse_enable_parallel_compute') and self.config.act_sparse_enable_parallel_compute:
+                topk_masks, intermediate_parallel = self._parallel_forward(
+                    permuted_local_hidden_states, tokens_per_expert, permuted_probs, bias_act_func, self.topk_modules.forward
+                )
+            else:
+                # 串行计算（原始方式）
+                intermediate_parallel, bias_parallel = self.linear_fc1(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+                intermediate_parallel = bias_act_func(
+                    intermediate_parallel, bias_parallel, permuted_probs
+                )
+                # 原始预测器计算
+                pred_masks = torch.sigmoid(
+                    self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0]
+                )
+                topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
+                
             intermediate_parallel = intermediate_parallel * topk_masks
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
 
@@ -1210,6 +1242,24 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}{name}.')
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
+
+    def _parallel_forward(self, permuted_local_hidden_states, tokens_per_expert, permuted_probs, bias_act_func, topk_func):
+        """并行执行预测器和主路径计算"""
+        
+        def predictor_compute():
+            mask = torch.sigmoid(
+                self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0]
+            )
+            return topk_func(mask, tokens_per_expert)[0]
+        
+        def main_compute():
+            intermediate_parallel, bias_parallel = self.linear_fc1(permuted_local_hidden_states, tokens_per_expert)
+            return bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
+        
+        return self.parallel_manager.parallel_forward(
+            predictor_compute, main_compute,
+            (), ()
+        )
 
 
 class SequentialMLP(MegatronModule):

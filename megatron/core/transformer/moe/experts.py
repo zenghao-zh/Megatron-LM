@@ -23,6 +23,14 @@ from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl, weighted_bias_swiglu_without_silu_impl
 from megatron.core.fusions.fused_balanced_topk import FusedBalancedTopkFunction
+
+# 尝试导入 Triton 版本，如果失败则回退到原始版本
+try:
+    from megatron.core.fusions.fused_balanced_topk_triton import FusedBalancedTopkTritonFunction
+    _TRITON_AVAILABLE = True
+except ImportError:
+    FusedBalancedTopkTritonFunction = None
+    _TRITON_AVAILABLE = False
 from megatron.core.jit import jit_fuser
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -996,8 +1004,15 @@ class GroupedBalancedTopkModule(MegatronModule):
                            f"but got {x.shape[-1]} for TP rank {self.tp_rank}")
 
         if self.act_sparse_enable_fused_balanced_topk:
-            mask = FusedBalancedTopkFunction.apply(x, tokens_per_expert, self.topk if k is None else k, 
-                                        self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
+            # 使用 Triton 加速版本（针对 k=16, bank_size=64 优化）
+            current_k = self.topk if k is None else k
+            if _TRITON_AVAILABLE and current_k == 16 and self.bank_size == 64:
+                mask = FusedBalancedTopkTritonFunction.apply(x, tokens_per_expert, current_k, 
+                                            self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
+            else:
+                # 回退到原始版本（Triton 不可用或非优化配置的情况）
+                mask = FusedBalancedTopkFunction.apply(x, tokens_per_expert, current_k, 
+                                            self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
         else:
             mask = BalancedTopkFunction.apply(x, tokens_per_expert, self.topk if k is None else k, 
                                         self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)

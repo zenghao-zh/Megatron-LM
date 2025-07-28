@@ -3,14 +3,11 @@ import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
+from megatron.core.fusions.fused_balanced_topk_triton import fused_balanced_topk_triton_sort_optimized
 
 
 @jit_fuser
-def fused_balanced_topk(input, tokens_per_expert_tensor, k, bank_size, bias, num_assigned_tokens, training = True):
-    """
-    torch.compile 兼容的 balanced topk 实现
-    """
-    
+def fused_balanced_topk(input, tokens_per_expert_tensor, k, bank_size, bias, num_assigned_tokens, training=True):
     # 创建专家索引
     expert_indices = torch.repeat_interleave(
         torch.arange(tokens_per_expert_tensor.shape[0], device=input.device),
@@ -36,10 +33,20 @@ def fused_balanced_topk(input, tokens_per_expert_tensor, k, bank_size, bias, num
     output = input * mask
 
     # 原地更新统计信息（torch.compile 支持）
+    # 使用与原始 BalancedTopkFunction 完全相同的统计方式
     if training:
-        mask_bool = (mask != 0).int() 
-        expert_indices_expanded = expert_indices.unsqueeze(1).expand_as(mask_bool)
-        num_assigned_tokens.scatter_add_(0, expert_indices_expanded, mask_bool)
+        with torch.no_grad():
+            mask_bool = (mask != 0).int()  # [total_tokens, hidden_size_per_partition]
+            
+            # 创建每个token对应的专家索引
+            expert_indices_expanded = expert_indices.unsqueeze(1).expand_as(mask_bool)
+            
+            # 按专家分组求和 - 与原始实现完全一致
+            num_assigned_tokens.scatter_add_(
+                0,  # 在专家维度上求和
+                expert_indices_expanded, 
+                mask_bool
+            )
 
     return output, mask
 
@@ -51,7 +58,7 @@ def fused_balanced_topk_back(g, mask):
 
 class FusedBalancedTopkFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, tokens_per_expert, k, bank_size, bias, num_assigned_tokens, training = True):
+    def forward(ctx, input, tokens_per_expert, k, bank_size, bias, num_assigned_tokens, training=True):
 
         output, mask = fused_balanced_topk(input, torch.tensor(tokens_per_expert, device=input.device), k, bank_size, bias, num_assigned_tokens, training)
 

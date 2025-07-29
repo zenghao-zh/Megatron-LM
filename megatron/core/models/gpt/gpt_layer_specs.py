@@ -75,6 +75,7 @@ def get_gpt_layer_with_transformer_engine_spec(
     use_te_op_fuser: Optional[bool] = False,
     use_kitchen: bool = False,
     act_sparse_training: bool = False,
+    use_coe_layer: bool = False
 ) -> ModuleSpec:
     """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
 
@@ -115,6 +116,7 @@ def get_gpt_layer_with_transformer_engine_spec(
         moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         use_te_op_fuser=use_te_op_fuser,
         act_sparse_training=act_sparse_training,
+        use_coe_layer=use_coe_layer
     )
 
     if multi_latent_attention:
@@ -362,7 +364,8 @@ def get_mlp_module_spec_for_backend(
     moe_grouped_gemm: Optional[bool] = False,
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,
-    act_sparse_training: Optional[bool]= False,
+    act_sparse_training: Optional[bool] = False,
+    use_coe_layer: Optional[bool] = False
 ) -> ModuleSpec:
     """Helper function to get module spec for MLP/MoE"""
 
@@ -388,6 +391,7 @@ def get_mlp_module_spec_for_backend(
             moe_grouped_gemm=moe_grouped_gemm,
             moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
             act_sparse_training=act_sparse_training,
+            use_coe_layer=use_coe_layer
         )
 
 
@@ -410,6 +414,7 @@ def get_gpt_decoder_block_spec(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             act_sparse_training=config.act_sparse_training,
+            use_coe_layer=False
         )
         moe_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             num_experts=config.num_moe_experts,
@@ -420,6 +425,7 @@ def get_gpt_decoder_block_spec(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             act_sparse_training=config.act_sparse_training,
+            use_coe_layer=config.use_coe_layer
         )
     else:
         layer_norm_impl = LNImpl

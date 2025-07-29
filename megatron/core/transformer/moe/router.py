@@ -123,7 +123,12 @@ class TopKRouter(Router):
             model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
         """
         super().__init__(config=config, model_comm_pgs=model_comm_pgs)
-        self.topk = self.config.moe_router_topk
+        if self.config.use_coe_layer:
+            assert self.config.moe_router_topk % self.config.coe_communication_steps == 0, \
+                f"moe_router_topk ({self.config.moe_router_topk}) must be divisible by coe_communication_steps ({self.config.coe_communication_steps})"
+            self.topk = self.config.moe_router_topk // self.config.coe_communication_steps
+        else:
+            self.topk = self.config.moe_router_topk
         self.routing_type = self.config.moe_router_load_balancing_type
         self.score_function = self.config.moe_router_score_function
         self.input_jitter = None

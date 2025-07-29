@@ -212,6 +212,15 @@ class TransformerConfig(ModelParallelConfig):
     act_sparse_enable_parallel_compute: bool = False
     """Whether to use parallel compute for balanced topk and fc1_linear."""
 
+    use_coe_layer: bool = False
+    """Whether to use chain of experts (coe) layer to replace moe layer."""
+
+    coe_communication_steps: int = 2
+    """Number of communication steps for coe layer."""
+
+    coe_shared_router: bool = False
+    """Whether to share same router for one coe layer"""
+
 
     ####################
     # initialization

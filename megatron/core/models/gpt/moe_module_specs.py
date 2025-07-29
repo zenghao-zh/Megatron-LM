@@ -4,7 +4,7 @@ from typing import Optional
 
 from megatron.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from megatron.core.transformer.mlp import MLPSubmodules
-from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
+from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules, CoELayer
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec
 
@@ -40,7 +40,8 @@ def get_moe_module_spec_for_backend(
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
-    act_sparse_training: Optional[bool]= False,
+    act_sparse_training: Optional[bool] = False,
+    use_coe_layer: Optional[bool] = False
 ) -> ModuleSpec:
     """Helper function to get module spec for MoE"""
     assert num_experts is not None
@@ -63,6 +64,6 @@ def get_moe_module_spec_for_backend(
 
     # MoE module spec
     moe_module_spec = ModuleSpec(
-        module=MoELayer, submodules=MoESubmodules(experts=experts, shared_experts=shared_experts)
+        module=MoELayer if not use_coe_layer else CoELayer, submodules=MoESubmodules(experts=experts, shared_experts=shared_experts)
     )
     return moe_module_spec

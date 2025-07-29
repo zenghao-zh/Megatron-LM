@@ -1994,6 +1994,12 @@ def _add_training_args(parser):
                        help='Enable fused balanced topk for sparse training of activation.')
     group.add_argument('--act-sparse-enable-parallel-compute', action='store_true', default=False,
                        help='Enable parallel compute for balanced topk and fc1_linear.')
+    group.add_argument('--use-coe-layer', action='store_true', default=False,
+                       help='Use chain of experts (coe) layer to replace moe layer.')
+    group.add_argument('--coe-communication-steps', type=int, default=2,
+                       help='Number of communication steps for coe layer.')
+    group.add_argument('--coe-shared-router', action='store_true', default=False,
+                       help='Share same router for one coe layer.')
 
     return parser
 

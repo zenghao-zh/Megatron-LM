@@ -6,14 +6,15 @@ MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
+EXPERIMENT_NAME=coe-0.6B
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b
+CHECKPOINT_PATH=/root/workspace/Megatron-LM/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
-DATA_PATH="0.693584 /ssd_1234/haozeng/data/slimpajama/merged_slimpajama 0.306416 /ssd_1234/haozeng/data/starcode/merged_starcode"
-TOKENIZER_MODEL=/ssd_1234/haozeng/data/llama/tokenizer.model
-WANDB_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/wandb
-TENSORBOARD_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/tensorboard
+DATA_PATH="0.693584 /root/data/slimpajama/merged_slimpajama 0.306416 /root/data/starcode/merged_starcode"
+TOKENIZER_MODEL=/root/data/llama/tokenizer.model
+WANDB_PATH=/root/workspace/Megatron-LM/wandb
+TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
 MAX_TRAIN_SAMPLES=38400000
 LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
@@ -56,7 +57,7 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss # options: aux_loss, sinkhorn, none. Default is aux_loss.
     --moe-router-topk 2
     --moe-router-dtype fp32
-    --moe-aux-loss-coeff 1e-2
+    --moe-aux-loss-coeff 5e-3
     --moe-token-dispatcher-type alltoall
     --moe-ffn-hidden-size 576
     --moe-shared-expert-intermediate-size 1152 # shared-experts 2
@@ -83,11 +84,15 @@ TRAINING_ARGS=(
     --bf16
 
     ## 激活稀疏训练参数
-    --act-sparse-training
-    --act-sparse-predictor-hidden-size 64
-    --act-sparse-bank-size 64
-    --act-sparse-topk 16
-    --act-sparse-btopk-coeff 0.001
+    # --act-sparse-training
+    # --act-sparse-predictor-hidden-size 64
+    # --act-sparse-bank-size 64
+    # --act-sparse-topk 16
+    # --act-sparse-btopk-coeff 0.001
+
+    ## Chain of Expert训练
+    --use-coe-layer               
+    --coe-communication-steps 2
 )
 
 MODEL_PARALLEL_ARGS=(
@@ -114,7 +119,7 @@ EVAL_AND_LOGGING_ARGS=(
     --save $CHECKPOINT_PATH
     ## --load $CHECKPOINT_PATH
     --wandb-project megatron-training
-    --wandb-exp-name MOE-0.6B-btopk-4x
+    --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard
     --tensorboard-dir $TENSORBOARD_PATH

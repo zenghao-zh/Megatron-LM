@@ -294,7 +294,7 @@ class CoELayer(BaseMoELayer):
         # Initialize process groups with the global parallel_state.
         if model_comm_pgs is None:
             model_comm_pgs = get_default_model_comm_pgs()
-        super(MoELayer, self).__init__(
+        super(CoELayer, self).__init__(
             config=config, layer_number=layer_number, model_comm_pgs=model_comm_pgs
         )
         self.moe_layer_recompute = (
@@ -353,6 +353,15 @@ class CoELayer(BaseMoELayer):
             )
             if self.shared_expert_overlap:
                 self.token_dispatcher.set_shared_experts(self.shared_experts)
+
+    def set_layer_number(self, layer_number: int):
+        """Set the layer number for the MoE layer."""
+        self.layer_number = layer_number
+        if self.router is not None:
+            self.router.set_layer_number(layer_number)
+        if self.routers is not None:
+            for router in self.routers:
+                router.set_layer_number(layer_number)
 
     def router_and_preprocess(self, hidden_states: torch.Tensor, router: TopKRouter):
         """Compute and preprocess token routing for dispatch.

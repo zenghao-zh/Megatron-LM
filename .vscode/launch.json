@@ -42,9 +42,9 @@
             "program": "${workspaceFolder}/tools/checkpoint/checkpoint_reshaping_and_interoperability.py",
             "args": [
                 "--convert_checkpoint_from_megatron_to_transformers",
-                "--load_path", "/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/iter_0018750",
-                "--save_path", "/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/trfs_checkpoint_iter_0018750",
-                "--tokenizer_name", "/ssd_1234/haozeng/data/llama",
+                "--load_path", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/iter_0018750",
+                "--save_path", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/trfs_checkpoint_iter_0018750",
+                "--tokenizer_name", "/root/data/llama",
                 "--max_shard_size", "1GB",
                 "--print-checkpoint-structure"
             ],
@@ -82,10 +82,10 @@
               "--eval-interval", "200",
               "--eval-iters", "10",
               "--tokenizer-type", "Llama2Tokenizer",
-              "--tokenizer-model", "/ssd_1234/haozeng/data/llama/tokenizer.model",
-              "--save", "/ssd_1234/haozeng/workspace/ByteMLPerf/byte_train_perf/Megatron-LM/checkpoints/test",
-              "--load", "/ssd_1234/haozeng/workspace/ByteMLPerf/byte_train_perf/Megatron-LM/checkpoints/test",
-              "--data-path", "2", "/ssd_1234/haozeng/data/starcode/starcode_train_ada_content_document", "3", "/ssd_1234/haozeng/data/starcode/starcode_train_applescript_content_document",
+              "--tokenizer-model", "/root/data/llama/tokenizer.model",
+              "--save", "/root/workspace/ByteMLPerf/byte_train_perf/Megatron-LM/checkpoints/test",
+              "--load", "/root/workspace/ByteMLPerf/byte_train_perf/Megatron-LM/checkpoints/test",
+              "--data-path", "2", "/root/data/starcode/starcode_train_ada_content_document", "3", "/root/data/starcode/starcode_train_applescript_content_document",
               "--tensorboard-dir", "experiments/tensorboard",
               "--split", "100,0,0"
             //   "--transformer-impl", "local",
@@ -121,8 +121,8 @@
                 "NNODES": "1",
                 // "NODE_RANK": "0",
                 "WORLD_SIZE": "1",
-                "TOKENIZER_MODEL": "/ssd_1234/haozeng/data/llama/tokenizer.model",
-                "WANDB_PATH": "/ssd_1234/haozeng/workspace/Megatron-LM/wandb"
+                "TOKENIZER_MODEL": "/root/data/llama/tokenizer.model",
+                "WANDB_PATH": "/root/workspace/Megatron-LM/wandb"
             },
             "args": [
                 "--nproc-per-node", "1",
@@ -188,6 +188,8 @@
                 // "--act-sparse-bank-size", "64",
                 // "--act-sparse-topk", "16",
                 // "--act-sparse-btopk-coeff", "0.001",
+                "--use-coe-layer",
+                "--coe-communication-steps", "2",
         
                 // === Model parallel args ===
                 "--tensor-model-parallel-size", "1",
@@ -199,8 +201,8 @@
         
                 // === Data args ===
                 "--tokenizer-type", "Llama2Tokenizer",
-                "--tokenizer-model", "/ssd_1234/haozeng/data/llama/tokenizer.model",
-                "--data-path", "0.693584", "/ssd_1234/haozeng/data/slimpajama/merged_slimpajama", "0.306416", "/ssd_1234/haozeng/data/starcode/merged_starcode",
+                "--tokenizer-model", "/root/data/llama/tokenizer.model",
+                "--data-path", "0.693584", "/root/data/slimpajama/merged_slimpajama", "0.306416", "/root/data/starcode/merged_starcode",
                 "--split", "1,0,0",
         
                 // === Logging & checkpointing ===
@@ -208,12 +210,12 @@
                 "--save-interval", "3000",
                 "--eval-interval", "3000",
                 "--eval-iters", "1",
-                "--save", "/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test",
-                // "--load", "/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline",
+                "--save", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test",
+                // "--load", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline",
                 // "--wandb-project", "megatron-training",
                 // "--wandb-exp-name", "MOE-0.6B-btopk-4x",
-                // "--wandb-save-dir", "/ssd_1234/haozeng/workspace/Megatron-LM/wandb",
-                "--tensorboard-dir", "/ssd_1234/haozeng/workspace/Megatron-LM/tensorboard",
+                // "--wandb-save-dir", "/root/workspace/Megatron-LM/wandb",
+                "--tensorboard-dir", "/root/workspace/Megatron-LM/tensorboard",
                 "--log-timers-to-tensorboard"
             ],
             "cwd": "${workspaceFolder}"
@@ -273,9 +275,9 @@
                 "--moe-ffn-hidden-size", "576",
                 "--moe-shared-expert-intermediate-size", "1152",
                 "--tokenizer-type", "Llama2Tokenizer",
-                "--tokenizer-model", "/ssd_1234/haozeng/data/llama/tokenizer.model",
+                "--tokenizer-model", "/root/data/llama/tokenizer.model",
                 "--valid-data", "<wikitext path>.txt",
-                "--load", "/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b",
+                "--load", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b",
                 "--ckpt-format", "torch_dist", 
                 "--micro-batch-size", "8",
                 "--log-interval", "10",

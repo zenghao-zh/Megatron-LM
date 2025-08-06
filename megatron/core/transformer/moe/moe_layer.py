@@ -35,6 +35,14 @@ class MoESubmodules:
     experts: Union[ModuleSpec, type] = None
     shared_experts: Union[ModuleSpec, type] = None
 
+@dataclass
+class CoESubmodules:
+    """CoE Layer Submodule spec"""
+
+    experts: Union[ModuleSpec, type] = None
+    shared_experts: Union[ModuleSpec, type] = None
+    layer_norm: Union[ModuleSpec, type] = None
+
 
 class BaseMoELayer(MegatronModule, ABC):
     """Base class for a mixture of experts layer.
@@ -303,6 +311,7 @@ class CoELayer(BaseMoELayer):
 
         # Initialize coe router
         self.coe_communication_steps = self.config.coe_communication_steps
+        self.layer_norm = build_module(self.submodules.layer_norm, config=self.config, hidden_size=self.config.hidden_size, eps=self.config.layernorm_epsilon)
 
         if self.config.coe_shared_router:
             self.router = TopKRouter(config=self.config, model_comm_pgs=model_comm_pgs)
@@ -387,7 +396,7 @@ class CoELayer(BaseMoELayer):
         return self.token_dispatcher.token_dispatch(hidden_states, probs)
 
     def experts_compute(
-        self, hidden_states: torch.Tensor, probs: torch.Tensor, residual: torch.Tensor, shared_expert_output: torch.Tensor
+        self, hidden_states: torch.Tensor, probs: torch.Tensor, residual: torch.Tensor
     ):
         """Computes the output of the experts on the dispatched tokens.
 
@@ -397,7 +406,7 @@ class CoELayer(BaseMoELayer):
         it is also applied. The output from the experts is preprocessed for the
         combine step.
         """
-        if self.use_shared_expert and not self.shared_expert_overlap and shared_expert_output is None:
+        if self.use_shared_expert and not self.shared_expert_overlap:
             # Compute the shared expert separately when not overlapped with communication.
             shared_expert_output = self.shared_experts(residual)
 
@@ -446,19 +455,18 @@ class CoELayer(BaseMoELayer):
 
         # MoE forward: route -> dispatch -> compute -> combine
         def custom_forward(hidden_states):
-            shared_expert_output = None
+            # shared_expert_output = None
             for i in range(self.coe_communication_steps):
                 router = self.routers[i] if self.routers is not None else self.router
                 hidden_states, probs, residual = self.router_and_preprocess(hidden_states, router)
                 dispatched_input, probs = self.dispatch(hidden_states, probs)
                 output, shared_expert_output, mlp_bias = self.experts_compute(
-                    dispatched_input, probs, residual, shared_expert_output
+                    dispatched_input, probs, residual
                 )
-                if i == self.coe_communication_steps - 1:
-                    output = self.combine(output, shared_expert_output)
-                else:
-                    output = self.combine(output, None)
-                    hidden_states = output + residual
+                output = self.combine(output, shared_expert_output) + residual
+                #     output = self.combine(output, None)
+                hidden_states = self.layer_norm(output)
+
             
             return output, mlp_bias
 

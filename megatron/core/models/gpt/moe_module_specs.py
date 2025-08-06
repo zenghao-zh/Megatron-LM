@@ -4,7 +4,7 @@ from typing import Optional
 
 from megatron.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from megatron.core.transformer.mlp import MLPSubmodules
-from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules, CoELayer
+from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules, CoELayer, CoESubmodules
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec
 
@@ -64,6 +64,6 @@ def get_moe_module_spec_for_backend(
 
     # MoE module spec
     moe_module_spec = ModuleSpec(
-        module=MoELayer if not use_coe_layer else CoELayer, submodules=MoESubmodules(experts=experts, shared_experts=shared_experts)
+        module=MoELayer if not use_coe_layer else CoELayer, submodules=MoESubmodules(experts=experts, shared_experts=shared_experts) if not use_coe_layer else CoESubmodules(experts=experts, shared_experts=shared_experts, layer_norm=backend.layer_norm())
     )
     return moe_module_spec

@@ -1002,7 +1002,7 @@ class GroupedBalancedTopkModule(MegatronModule):
         if x.shape[-1] != self.hidden_size_per_partition:
             raise ValueError(f"Expected input hidden size {self.hidden_size_per_partition} "
                            f"but got {x.shape[-1]} for TP rank {self.tp_rank}")
-
+        ## TODO: 优化这个功能
         if self.act_sparse_enable_fused_balanced_topk:
             # 使用 Triton 加速版本（针对 k=16, bank_size=64 优化）
             current_k = self.topk if k is None else k
@@ -1204,6 +1204,7 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         else:
             if hasattr(self.config, 'act_sparse_enable_parallel_compute') and self.config.act_sparse_enable_parallel_compute:
+                ## TODO: 删去这个功能
                 topk_masks, intermediate_parallel = self._parallel_forward(
                     permuted_local_hidden_states, tokens_per_expert, permuted_probs, bias_act_func, self.topk_modules.forward
                 )

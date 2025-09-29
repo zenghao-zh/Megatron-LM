@@ -53,6 +53,7 @@ from megatron.training.checkpointing import save_checkpoint
 from megatron.training.checkpointing import checkpoint_exists
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.experts import GroupedBalancedTopkModule
+from megatron.core.transformer.mlp import BalancedTopkModule
 from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
@@ -1364,7 +1365,7 @@ def update_balanced_bias(model, u = 0.001):
     
     def collect_modules(module):
         for child in module.children():
-            if isinstance(child, GroupedBalancedTopkModule):
+            if isinstance(child, GroupedBalancedTopkModule) or isinstance(child, BalancedTopkModule):
                 modules_to_update.append(child)
             if len(list(child.children())) > 0:
                 collect_modules(child)
@@ -1406,10 +1407,10 @@ def update_balanced_bias(model, u = 0.001):
             )
         
         # 基于完整的统计信息计算平衡偏差
-        mean = global_num_assigned.float().mean(dim=1, keepdim=True)
+        mean = global_num_assigned.float().mean(dim=-1, keepdim=True)
 
         if mean.sum() != 0:
-            max_violation += ((global_num_assigned.max(dim=1, keepdim=True)[0] - mean) / mean).mean().item()
+            max_violation += ((global_num_assigned.max(dim=-1, keepdim=True)[0] - mean) / mean).mean().item()
             
             e = mean - global_num_assigned
             # 关闭amp的autocast，防止balanced_bias被转为bf16
@@ -1423,7 +1424,7 @@ def update_balanced_bias(model, u = 0.001):
                     hidden_size_per_partition = module.hidden_size_per_partition
                     start_idx = tp_rank * hidden_size_per_partition
                     end_idx = (tp_rank + 1) * hidden_size_per_partition
-                    local_bias_update = bias_update[:, start_idx:end_idx]
+                    local_bias_update = bias_update[..., start_idx:end_idx]
                 else:
                     local_bias_update = bias_update
                 
@@ -1507,7 +1508,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     mean_max_violation = None
     if config.act_sparse_training:
         mean_max_violation =update_balanced_bias(model[0], u = config.act_sparse_btopk_coeff)
-        print_rank_0(f"mean_max_violation: {mean_max_violation}")
+        # print_rank_0(f"mean_max_violation: {mean_max_violation}")
 
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,

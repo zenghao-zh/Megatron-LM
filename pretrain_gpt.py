@@ -139,6 +139,7 @@ def model_provider(
                         args.moe_use_legacy_grouped_gemm,
                         qk_l2_norm=args.qk_l2_norm,
                         use_kitchen=config.use_kitchen,
+                        act_sparse_training=config.act_sparse_training,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(

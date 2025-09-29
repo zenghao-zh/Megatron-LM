@@ -11,7 +11,8 @@ from megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelGroupedLinear,
     TERowParallelLinear,
-    TEDuplicatedGroupedLinear
+    TEDuplicatedGroupedLinear,
+    TEDuplicatedLinear
 )
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.backends import BackendSpecProvider
@@ -32,6 +33,10 @@ class TESpecProvider(BackendSpecProvider):
     def row_parallel_linear(self) -> type:
         """Which row parallel linear module TE backend uses"""
         return TERowParallelLinear
+
+    def duplicated_linear(self) -> type:
+        """Which duplicated linear module TE backend uses"""
+        return TEDuplicatedLinear
 
     def fuse_layernorm_and_linear(self) -> bool:
         """TE backend chooses a single module for layernorm and linear"""

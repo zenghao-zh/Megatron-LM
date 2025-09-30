@@ -108,6 +108,7 @@ def _get_param_groups(
             else:
                 # Do not regularize biases and norm parameters.
                 no_wd = name.endswith(".bias") or len(param.shape) == 1
+            ## 0930 TODO: add predictor weight decay condition
 
             if scale_lr_cond is not None:
                 scale_lr = scale_lr_cond(name, param)
@@ -141,6 +142,7 @@ def _get_param_groups(
                 params_map[key].append(param_shard)
             else:
                 params_map[key].append(param)
+            # print(f"name: {name}, key: {key}")
 
     param_groups = []
     for (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr), params in params_map.items():

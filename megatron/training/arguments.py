@@ -1143,7 +1143,9 @@ def core_transformer_config_from_args(args, config_class=None):
         kw_args['gated_linear_unit'] = True
         kw_args['bias_activation_fusion'] = args.bias_swiglu_fusion
     elif args.swiglu and args.act_sparse_swiglu_without_silu:
-        kw_args['activation_func'] = F.silu
+        kw_args['activation_func'] = identity
+        if args.num_experts is not None:
+            kw_args['activation_func'] = F.silu
         kw_args['no_shared_expert_activation_func'] = identity
         kw_args['gated_linear_unit'] = True
         kw_args['bias_activation_fusion'] = args.bias_swiglu_fusion

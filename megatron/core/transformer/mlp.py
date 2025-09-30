@@ -18,7 +18,7 @@ from megatron.core.dist_checkpointing.mapping import (
 )
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
-from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
+from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl, bias_swiglu_without_silu_impl
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -27,6 +27,7 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+from megatron.core.transformer.identity_op import identity
 
 try:
     import transformer_engine  # pylint: disable=unused-import
@@ -268,6 +269,15 @@ class BalancedTopkMLP(MegatronModule):
                         intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
                 elif self.activation_func == F.silu and self.config.gated_linear_unit:
                     intermediate_parallel = bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        self.config.activation_func_fp8_input_store,
+                        self.config.cpu_offloading
+                        and self.config.cpu_offloading_activations
+                        and HAVE_TE,
+                    )
+                elif self.activation_func == identity and self.config.gated_linear_unit:
+                    intermediate_parallel = bias_swiglu_without_silu_impl(
                         intermediate_parallel,
                         bias_parallel,
                         self.config.activation_func_fp8_input_store,

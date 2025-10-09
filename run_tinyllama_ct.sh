@@ -15,7 +15,7 @@ TOKENIZER_MODEL=/root/data/llama/tokenizer.model
 WANDB_PATH=/root/workspace/Megatron-LM/wandb
 TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
-MAX_TRAIN_SAMPLES=50000000
+MAX_TRAIN_SAMPLES=100000000
 LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
 
 
@@ -70,6 +70,7 @@ TRAINING_ARGS=(
     --norm-epsilon 1e-5
     --clip-grad 1.0
     --bf16
+    --override-opt_param-scheduler
     ## 激活稀疏训练参数
     # --act-sparse-training
     # --act-sparse-predictor-hidden-size 64

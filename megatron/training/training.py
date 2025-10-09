@@ -1304,6 +1304,7 @@ def setup_model_and_optimizer(
             skip_load_to_model_and_opt=HAVE_FSDP2
             and getattr(args, "use_torch_fsdp2", False)
             and args.ckpt_format == "torch_dist",
+            strict = False if args.act_sparse_training and args.no_load_optim else True,
         )
         timers('load-checkpoint').stop(barrier=True)
         timers.log(['load-checkpoint'])

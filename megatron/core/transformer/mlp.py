@@ -497,7 +497,7 @@ class MLP(MegatronModule):
         sharded_state_dict = {}
         for name, module in self._modules.items():
             sub_sd = module.sharded_state_dict(f'{prefix}{name}.', sharded_offsets, metadata)
-            if self.config.gated_linear_unit and name == 'linear_fc1':
+            if self.config.gated_linear_unit and name == 'linear_fc1' and 'predictor' not in prefix:
                 for k, v in sub_sd.items():
                     if k in (f'{prefix}{name}.weight', f'{prefix}{name}.bias'):
                         sub_sd[k] = apply_swiglu_sharded_factory(v, sharded_offsets)

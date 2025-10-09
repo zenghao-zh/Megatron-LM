@@ -188,6 +188,7 @@
                 "--act-sparse-bank-size", "64",
                 "--act-sparse-topk", "16",
                 "--act-sparse-btopk-coeff", "0.001",
+                "--act-sparse-swiglu-without-silu",
                 // "--use-coe-layer",
                 // "--coe-communication-steps", "2",
         
@@ -207,11 +208,14 @@
         
                 // === Logging & checkpointing ===
                 "--log-interval", "1",
-                "--save-interval", "3000",
+                "--save-interval", "1",
                 "--eval-interval", "3000",
                 "--eval-iters", "1",
                 "--save", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test",
                 "--load", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test",
+                "--no-load-optim",
+                "--no-load-rng",
+                "--dist-ckpt-strictness", "ignore_all",
                 // "--wandb-project", "megatron-training",
                 // "--wandb-exp-name", "MOE-0.6B-btopk-4x",
                 // "--wandb-save-dir", "/root/workspace/Megatron-LM/wandb",

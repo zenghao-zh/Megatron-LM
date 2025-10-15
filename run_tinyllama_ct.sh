@@ -6,8 +6,10 @@ MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 EXPERIMENT_NAME=tinyllama-120m
+CT_EXPERIMENT_NAME=tinyllama-120m-btopk-4x-predictor_independently-4B-ct
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
+LOAD_CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
+SAVE_CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$CT_EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
 DATA_PATH="0.693584 /root/data/slimpajama/merged_slimpajama 0.306416 /root/data/starcode/merged_starcode"
@@ -63,21 +65,23 @@ TRAINING_ARGS=(
     # --lr-decay-multi-step 0.6 0.3 0.1
     --min-lr 1e-8
     --lr-warmup-init 1e-8
-    --weight-decay 0.1
+    --weight-decay 0.01
     --adam-beta1 0.9
     --adam-beta2 0.95
     --adam-eps 1e-8
     --norm-epsilon 1e-5
     --clip-grad 1.0
     --bf16
-    --override-opt_param-scheduler
+    --no-load-optim
+    --dist-ckpt-strictness log_all
+    # --override-opt_param-scheduler
     ## 激活稀疏训练参数
-    # --act-sparse-training
-    # --act-sparse-predictor-hidden-size 64
-    # --act-sparse-bank-size 64
-    # --act-sparse-topk 16
-    # --act-sparse-btopk-coeff 0.001
-    # --act-sparse-swiglu-without-silu
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 16
+    --act-sparse-btopk-coeff 0.001
+    --act-sparse-swiglu-without-silu
 
     ## Chain of Expert训练
     # --use-coe-layer               
@@ -105,10 +109,11 @@ EVAL_AND_LOGGING_ARGS=(
     --save-interval 5000
     --eval-interval 5000
     --eval-iters 1
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    --save $SAVE_CHECKPOINT_PATH
+    --load $LOAD_CHECKPOINT_PATH
+    --ckpt-step 24414
     --wandb-project megatron-training-tinyllama
-    --wandb-exp-name $EXPERIMENT_NAME
+    --wandb-exp-name $CT_EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard
     --tensorboard-dir $TENSORBOARD_PATH

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.tensor_parallel.utils import divide
 from megatron.core.dist_checkpointing import ShardedTensor
+from megatron.core.transformer.moe.moe_utils import save_to_aux_losses_tracker
 from megatron.core.dist_checkpointing.mapping import (
     ReplicaId,
     ShardedStateDict,
@@ -142,6 +143,45 @@ class BalancedTopkModule(MegatronModule):
     def reset_num_assigned_tokens(self):
         self.num_assigned_tokens.zero_()
 
+class AddAuxiliaryLoss(torch.autograd.Function):
+    """
+    The trick function of adding auxiliary (aux) loss, 
+    which includes the gradient of the aux loss during backpropagation.
+    """
+    @staticmethod
+    def forward(ctx, x, loss):
+        ctx.dtype = loss.dtype
+        ctx.required_aux_loss = loss.requires_grad
+        ctx.shape = loss.numel()
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_loss = None
+        if ctx.required_aux_loss:
+            grad_loss = torch.ones(ctx.shape, dtype=ctx.dtype, device=grad_output.device)
+        return grad_output, grad_loss
+
+class TopKFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, k: int = 16, bank_size: int = 64):
+        x = input.view(-1, input.shape[-1]//bank_size, bank_size)
+        _, topk_indices = x.abs().topk(k, dim=-1)
+        mask = torch.zeros_like(x)
+        mask.scatter_(-1, topk_indices, 1)
+        mask = mask.view_as(input)
+
+        ctx.save_for_backward(mask)
+
+        return input*mask
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (mask,) = ctx.saved_tensors
+        grad_output = grad_output*mask
+       
+        return grad_output, None, None
+
 class BalancedTopkMLP(MegatronModule):
     """
     MLP will take the input with h hidden state, project it to 4*h
@@ -171,6 +211,7 @@ class BalancedTopkMLP(MegatronModule):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
+        self.layer_number = None
 
         self.input_size = input_size if input_size != None else self.config.hidden_size
 
@@ -238,13 +279,23 @@ class BalancedTopkMLP(MegatronModule):
             tp_group=tp_group,
         )
 
+        self.train_predictor_independently = False
+
+    def set_train_predictor_independently(self, train_predictor_independently: bool):
+        self.train_predictor_independently = train_predictor_independently
+
+    def set_layer_number(self, layer_number: int):
+        """Set the layer number for the MLP."""
+        self.layer_number = layer_number
+
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="linear_fc1")
         intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
         nvtx_range_pop(suffix="linear_fc1")
-
+        if self.train_predictor_independently:
+            y_1, _ = torch.chunk(intermediate_parallel, 2, -1)
         nvtx_range_push(suffix="activation")
         if self.config.bias_activation_fusion:
             if per_token_scale is not None:
@@ -307,9 +358,23 @@ class BalancedTopkMLP(MegatronModule):
         nvtx_range_pop(suffix="activation")
 
         nvtx_range_push(suffix="predictor")
-        pred_mask = torch.sigmoid(self.predictor(hidden_states)[0])
-        topk_mask, *_ = self.topk_module(pred_mask)
-        intermediate_parallel = intermediate_parallel * topk_mask
+        if self.train_predictor_independently:
+            pred_mask = torch.sigmoid(self.predictor(hidden_states.detach())[0])
+            target = torch.sigmoid(y_1)
+            predictor_loss = F.mse_loss(pred_mask, target.detach(), reduction='mean')
+            save_to_aux_losses_tracker(
+                "predictor_loss",
+                predictor_loss,
+                self.layer_number,
+                self.config.num_layers,
+            )
+            intermediate_parallel = AddAuxiliaryLoss.apply(intermediate_parallel, predictor_loss)
+
+            intermediate_parallel = intermediate_parallel * TopKFunction.apply(target, self.topk_module.topk, self.topk_module.bank_size)
+        else: 
+            pred_mask = torch.sigmoid(self.predictor(hidden_states)[0])
+            topk_mask, *_ = self.topk_module(pred_mask)
+            intermediate_parallel = intermediate_parallel * topk_mask
         nvtx_range_pop(suffix="predictor")
 
         # [s, b, h]

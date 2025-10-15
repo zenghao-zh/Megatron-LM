@@ -171,7 +171,7 @@
                 "--micro-batch-size", "4",
                 "--global-batch-size", "128",
                 "--lr", "3e-4",
-                "--train-samples", "38400000",
+                "--train-samples", "51200000",
                 "--lr-warmup-samples", "2048000",
                 "--lr-decay-style", "constant",
                 "--min-lr", "1e-8",
@@ -189,6 +189,7 @@
                 "--act-sparse-topk", "16",
                 "--act-sparse-btopk-coeff", "0.001",
                 "--act-sparse-swiglu-without-silu",
+                // "--override-opt_param-scheduler",
                 // "--use-coe-layer",
                 // "--coe-communication-steps", "2",
         
@@ -208,7 +209,7 @@
         
                 // === Logging & checkpointing ===
                 "--log-interval", "1",
-                "--save-interval", "1",
+                "--save-interval", "100",
                 "--eval-interval", "3000",
                 "--eval-iters", "1",
                 "--save", "/root/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test",

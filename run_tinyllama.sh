@@ -105,7 +105,7 @@ EVAL_AND_LOGGING_ARGS=(
     --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --wandb-project megatron-training-tinyllama
     --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH

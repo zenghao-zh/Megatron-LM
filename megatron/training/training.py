@@ -53,7 +53,7 @@ from megatron.training.checkpointing import save_checkpoint
 from megatron.training.checkpointing import checkpoint_exists
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.experts import GroupedBalancedTopkModule
-from megatron.core.transformer.mlp import BalancedTopkModule
+from megatron.core.transformer.mlp import BalancedTopkModule, BalancedTopkMLP
 from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
@@ -135,6 +135,17 @@ stimer = StragglerDetector()
 
 from megatron.core.msc_utils import MultiStorageClientFeature, open_file
 
+def update_trainable_params(model, stage_config):
+    """冻结/解冻特定参数"""
+    for model_chunk in model:
+        for name, param in model_chunk.named_parameters():
+            if stage_config['trainable_modules'] == 'all':
+                param.requires_grad = True
+            else:
+                # 检查参数名是否匹配要训练的模块
+                should_train = any(module_name in name 
+                                for module_name in stage_config['trainable_modules'])
+                param.requires_grad = should_train
 
 def destroy_global_state():
     destroy_global_vars()
@@ -1224,7 +1235,10 @@ def setup_model_and_optimizer(
 
     model = get_model(model_provider_func, model_type)
     unwrapped_model = unwrap_model(model)
-
+    if args.no_load_optim and args.act_sparse_training:
+        no_wd_decay_cond = lambda name, param: 'predictor' in name
+        scale_lr_cond = lambda name, param: 'predictor' not in name
+        # lr_mult = 0.0  ## uncomment to disable lr scaling for predictor parameters
     kwargs = {}
     for f in dataclasses.fields(OptimizerConfig):
         if hasattr(args, f.name):
@@ -1360,18 +1374,26 @@ def dummy_train_step(data_iterator):
         batch = get_batch_on_this_tp_rank(data_iterator)
         batch = get_batch_on_this_cp_rank(batch)
 
+def collect_topk_modules(module, modules_to_update):
+    for child in module.children():
+        if isinstance(child, GroupedBalancedTopkModule) or isinstance(child, BalancedTopkModule):
+            modules_to_update.append(child)
+        if len(list(child.children())) > 0:
+            collect_topk_modules(child, modules_to_update)
+
+def collect_btopk_mlp_modules(module, modules_to_update):
+    for child in module.children():
+        if isinstance(child, BalancedTopkMLP):
+            modules_to_update.append(child)
+        if len(list(child.children())) > 0:
+            collect_btopk_mlp_modules(child, modules_to_update)
+
 def update_balanced_bias(model, u = 0.001):
     max_violation = 0
     modules_to_update = []
+
     
-    def collect_modules(module):
-        for child in module.children():
-            if isinstance(child, GroupedBalancedTopkModule) or isinstance(child, BalancedTopkModule):
-                modules_to_update.append(child)
-            if len(list(child.children())) > 0:
-                collect_modules(child)
-    
-    collect_modules(model)
+    collect_topk_modules(model, modules_to_update)
     
     if not modules_to_update:
         return
@@ -1508,7 +1530,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update bias
     mean_max_violation = None
     if config.act_sparse_training:
-        mean_max_violation =update_balanced_bias(model[0], u = config.act_sparse_btopk_coeff)
+        for model_chunk in model:
+            mean_max_violation = update_balanced_bias(model_chunk, u = config.act_sparse_btopk_coeff)
         # print_rank_0(f"mean_max_violation: {mean_max_violation}")
 
 
@@ -1755,6 +1778,8 @@ def training_log(
             track_names.append("load_balancing_loss")
         if args.moe_z_loss_coeff is not None:
             track_names.append("z_loss")
+        if args.act_sparse_training:
+            track_names.append("predictor_loss")
         track_moe_metrics(
             loss_scale=moe_loss_scale,
             iteration=iteration,
@@ -1766,6 +1791,22 @@ def training_log(
             track_names=track_names,
             num_layers=args.num_layers,
             moe_layer_freq=args.moe_layer_freq,
+        )
+    if args.act_sparse_training and args.num_experts is None:
+        # Track predictor loss for activation sparse training (non-MoE case)
+        loss_scale = 1 / get_num_microbatches()
+        track_names = ["predictor_loss"]
+        track_moe_metrics(
+            loss_scale=loss_scale,
+            iteration=iteration,
+            writer=writer,
+            wandb_writer=wandb_writer,
+            total_loss_dict=total_loss_dict,
+            per_layer_logging=False,
+            force_initialize=True,
+            track_names=track_names,
+            num_layers=args.num_layers,
+            moe_layer_freq=None,
         )
     if args.mtp_num_layers is not None:
         mtp_loss_scale = 1 / get_num_microbatches()
@@ -2316,8 +2357,76 @@ def train(
         torch.distributed.barrier()
         print_rank_0(f">>> Weight hashes match after {iteration} iterations...")
 
+    # 定义应用训练阶段设置的函数
+    def apply_stage_settings(stage_config, stage_idx):
+        """应用训练阶段的配置设置"""
+        print_rank_0(f"Applying stage {stage_idx} settings: {stage_config}")
+        
+        # 更新学习率倍数
+        if 'lr_mult' in stage_config:
+            for param_group in optimizer.param_groups:
+                param_group['lr_mult'] = stage_config['lr_mult']
+        
+        # 更新topk参数
+        if 'topk' in stage_config:
+            print_rank_0(f"Setting topk to {stage_config['topk']}")
+            config.act_sparse_btopk_coeff = stage_config['topk']
+            modules_to_update = []
+            for model_chunk in model:
+                collect_topk_modules(model_chunk, modules_to_update)
+            for module in modules_to_update:
+                module.topk = stage_config['topk']
+        
+        # 更新train_predictor_independently参数
+        if 'train_predictor_independently' in stage_config:
+            print_rank_0(f"Setting train_predictor_independently to {stage_config['train_predictor_independently']}")
+            modules_to_update = []
+            for model_chunk in model:
+                collect_btopk_mlp_modules(model_chunk, modules_to_update)
+            for module in modules_to_update:
+                module.train_predictor_independently = stage_config['train_predictor_independently']
+
+    # 在训练循环中判断阶段切换
+    current_stage = 0
+    stage_start_iter = start_iteration
+    # 定义训练阶段配置
+    if args.no_load_optim and args.act_sparse_training:
+        print_rank_0("Using training stages")
+        ## 全部打开训
+        training_stages = [
+            {
+                'iterations': 1000,  # 到1000次迭代切换到下一阶段
+                'trainable_modules': 'all',  # 训练predictor独立地
+                'train_predictor_independently': True,
+            },
+            {
+                'iterations': -1,  # -1表示训练到结束
+                'trainable_modules': 'all',  # 训练所有层
+                'train_predictor_independently': False,
+            }
+        ]
+        # 应用第一个阶段的初始设置
+        if len(training_stages) > 0:
+            apply_stage_settings(training_stages[0], 0)
+    else:
+        training_stages = []
+    
     # Run training iterations till done.
     while iteration < args.train_iters:
+        # 检查是否需要切换训练阶段
+        if current_stage < len(training_stages):
+            stage = training_stages[current_stage]
+            if stage['iterations'] != -1 and \
+            (iteration - stage_start_iter) >= stage['iterations']:
+                # 切换到下一阶段
+                current_stage += 1
+                stage_start_iter = iteration
+                if current_stage < len(training_stages):
+                    new_stage = training_stages[current_stage]
+                    print_rank_0(f"Switching to stage {current_stage} at iteration {iteration}")
+                    apply_stage_settings(new_stage, current_stage)
+
+
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             if args.use_pytorch_profiler:
                 prof.step()

@@ -2365,7 +2365,8 @@ def train(
         # 更新学习率倍数
         if 'lr_mult' in stage_config:
             for param_group in optimizer.param_groups:
-                param_group['lr_mult'] = stage_config['lr_mult']
+                if param_group['wd_mult'] != 0:
+                    param_group['lr_mult'] = stage_config['lr_mult']
         
         # 更新topk参数
         if 'topk' in stage_config:
@@ -2396,13 +2397,12 @@ def train(
         training_stages = [
             {
                 'iterations': 1000,  # 到1000次迭代切换到下一阶段
-                'trainable_modules': 'all',  # 训练predictor独立地
                 'train_predictor_independently': True,
             },
             {
                 'iterations': -1,  # -1表示训练到结束
-                'trainable_modules': 'all',  # 训练所有层
                 'train_predictor_independently': False,
+                'lr_mult': 1.0,
             }
         ]
         # 应用第一个阶段的初始设置

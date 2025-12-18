@@ -28,7 +28,7 @@ import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from packaging import version
 
-from transformers import AutoTokenizer, GPT2Config, LlamaForCausalLM, LlamaConfig
+from transformers import AutoTokenizer, GPT2Config
 from hf_moe import MoEConfig, MoEForCausalLM
 from transformers.modeling_utils import WEIGHTS_INDEX_NAME, WEIGHTS_NAME
 from transformers.utils import check_torch_load_is_safe

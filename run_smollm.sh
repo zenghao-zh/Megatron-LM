@@ -1,22 +1,21 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-
-GPUS_PER_NODE=2
+GPUS_PER_NODE=8
 MASTER_ADDR=localhost
-MASTER_PORT=6002
+MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
+EXPERIMENT_NAME=smollm-360m
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test
-CHECKPOINT_PATH_TORCH=/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-test-torch
+CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
-DATA_PATH="0.693584 /ssd_1234/haozeng/data/slimpajama/merged_slimpajama 0.306416 /ssd_1234/haozeng/data/starcode/merged_starcode"
-TOKENIZER_MODEL=/ssd_1234/haozeng/data/llama/tokenizer.model
-WANDB_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/wandb
-TENSORBOARD_PATH=/ssd_1234/haozeng/workspace/Megatron-LM/tensorboard
+DATA_PATH="/root/data/smollm_corpus/merged_smollm_corpus"
+TOKENIZER_MODEL=/root/data/cosmo2-tokenizer
+WANDB_PATH=/root/workspace/Megatron-LM/wandb
+TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
-MAX_TRAIN_SAMPLES=38400000
+MAX_TRAIN_SAMPLES=50000000
 LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
 
 
@@ -30,45 +29,34 @@ DISTRIBUTED_ARGS=(
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 8192
-    --max-position-embeddings 8192
-    --num-layers 8
-    --hidden-size 1024
-    --num-attention-heads 8
+    --seq-length 2048
+    --max-position-embeddings 2048
+    --num-layers 32
+    --hidden-size 960
+    --num-attention-heads 15
+    --ffn-hidden-size 2560
     --init-method-std 0.006
     --attention-dropout 0.0
     --hidden-dropout 0.0
     --normalization RMSNorm
     --position-embedding-type rope
     --swiglu
-    --untie-embeddings-and-output-weights
+    # --untie-embeddings-and-output-weights
     --group-query-attention
-    --num-query-groups 2
+    --num-query-groups 5
     --no-masked-softmax-fusion
     --position-embedding-type rope
     --rotary-base 10000
     --attention-softmax-in-fp32
+    --vocab-size 49152
     # --use-cpu-initialization
-)
-
-MOE_ARGS=(
-    --num-experts 32
-    --moe-grouped-gemm
-    --moe-router-load-balancing-type aux_loss # options: aux_loss, sinkhorn, none. Default is aux_loss.
-    --moe-router-topk 2
-    --moe-router-dtype fp32
-    --moe-aux-loss-coeff 1e-2
-    --moe-token-dispatcher-type alltoall
-    --moe-ffn-hidden-size 512
-    --moe-shared-expert-intermediate-size 1152 # shared-experts 2
-    #--moe-expert-capacity-factor 1.2
 )
 
 TRAINING_ARGS=(
     --seed 3407
-    --micro-batch-size 8
-    --global-batch-size 2048
-    --lr 3e-4
+    --micro-batch-size 16
+    --global-batch-size 512
+    --lr 3e-3
     --train-samples $MAX_TRAIN_SAMPLES
     --lr-warmup-samples $LR_WARMUP_SAMPLES
     --lr-decay-style constant
@@ -79,22 +67,26 @@ TRAINING_ARGS=(
     --adam-beta1 0.9
     --adam-beta2 0.95
     --adam-eps 1e-8
-    --norm-epsilon 1e-6
+    --norm-epsilon 1e-5
     --clip-grad 1.0
     --bf16
-
     ## 激活稀疏训练参数
-    --act-sparse-training
-    --act-sparse-predictor-hidden-size 64
-    --act-sparse-bank-size 64
-    --act-sparse-topk 16
-    --act-sparse-btopk-coeff 0.001
+    # --act-sparse-training
+    # --act-sparse-predictor-hidden-size 64
+    # --act-sparse-bank-size 64
+    # --act-sparse-topk 16
+    # --act-sparse-btopk-coeff 0.001
     # --act-sparse-swiglu-without-silu
+
+    ## Chain of Expert训练
+    # --use-coe-layer               
+    # --coe-communication-steps 2
 )
 
 MODEL_PARALLEL_ARGS=(
-    # --tensor-model-parallel-size 1
-    --expert-model-parallel-size 2
+    --tensor-model-parallel-size 1
+   # --expert-model-parallel-size 1
+    # --pipeline-model-parallel-size 2
     --use-distributed-optimizer
     --sequence-parallel
     # --use-torch-fsdp2
@@ -102,7 +94,7 @@ MODEL_PARALLEL_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model $TOKENIZER_MODEL
     --data-path $DATA_PATH
     --split 1,0,0
@@ -110,19 +102,16 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 3000
-    --eval-interval 3000
+    --save-interval 5000
+    --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
-    # --wandb-project megatron-training
-    # --wandb-exp-name MOE-0.6B-btopk-4x
-    # --wandb-save-dir $WANDB_PATH
+    # --load $CHECKPOINT_PATH
+    --wandb-project megatron-training-smollm
+    --wandb-exp-name $EXPERIMENT_NAME
+    --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard
     --tensorboard-dir $TENSORBOARD_PATH
-    --ckpt-convert-format torch
-    --ckpt-convert-save $CHECKPOINT_PATH_TORCH
-    # --ckpt-step 15000
     # --wandb-project benchmark_training
     # --wandb-exp-name moe8x2-7B
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH
@@ -136,5 +125,4 @@ torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${DATA_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
-    ${EVAL_AND_LOGGING_ARGS[@]}
-
+    ${EVAL_AND_LOGGING_ARGS[@]} 

@@ -369,7 +369,7 @@ def get_mlp_module_spec_for_backend(
     use_te_op_fuser: Optional[bool] = False,
     act_sparse_training: Optional[bool] = False,
     use_coe_layer: Optional[bool] = False,
-    use_te_op_norm_linear_fuser: Optional[bool] = False
+    use_te_op_norm_linear_fuser: Optional[bool] = False ## TODO: 这个参数会影响moe ckpt的存储方式，但不影响实际的模型结构
 ) -> ModuleSpec:
     """Helper function to get module spec for MLP/MoE"""
 

@@ -7,10 +7,10 @@ set -e
 set -x
 
 # 定义参数
-LOAD_PATH="/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/iter_0018750"
-SAVE_PATH="/ssd_1234/haozeng/workspace/Megatron-LM/checkpoints/moe-0.6b-baseline-torch/torch/trfs_checkpoint_iter_0018750"
-TOKENIZER_NAME="/ssd_1234/haozeng/data/llama"
-MAX_SHARD_SIZE="1GB"
+LOAD_PATH="/root/workspace/Megatron-LM/checkpoints/moe-0.6B-input2-topk-4x-torch/torch/iter_0018750"
+SAVE_PATH="/root/workspace/Megatron-LM/checkpoints/moe-0.6B-input2-topk-4x-torch/torch/trfs_checkpoint_iter_iter_0018750"
+TOKENIZER_NAME="/root/data/llama"
+MAX_SHARD_SIZE="10GB"
 
 # 获取脚本所在目录作为工作目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

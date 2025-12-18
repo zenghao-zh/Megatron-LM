@@ -3,12 +3,12 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 GPUS_PER_NODE=8
 MASTER_ADDR=localhost
-MASTER_PORT=6001
+MASTER_PORT=6002
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=moe-0.6B-input2-btopk-4x
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
-CHECKPOINT_PATH=/root/workspace/Megatron-LM/checkpoints/$EXPERIMENT_NAME
+CHECKPOINT_PATH=/root/workspace/Megatron-LM/checkpoints/moe-0.6B-input2-topk-8x
+CHECKPOINT_PATH_TORCH=/root/workspace/Megatron-LM/checkpoints/moe-0.6B-input2-topk-8x-torch
 # VOCAB_FILE=vocab.json
 # MERGE_FILE=merges.txt
 DATA_PATH="0.693584 /root/data/slimpajama/merged_slimpajama 0.306416 /root/data/starcode/merged_starcode"
@@ -87,17 +87,13 @@ TRAINING_ARGS=(
     --act-sparse-training
     --act-sparse-predictor-hidden-size 64
     --act-sparse-bank-size 64
-    --act-sparse-topk 16
-    --act-sparse-btopk-coeff 0.001
-
-    ## Chain of Expert训练
-    # --use-coe-layer               
-    # --coe-communication-steps 2
+    --act-sparse-topk 8
+    --act-sparse-btopk-coeff 0.0
 )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 1
-   # --expert-model-parallel-size 1
+    # --expert-model-parallel-size 2
     --use-distributed-optimizer
     --sequence-parallel
     # --use-torch-fsdp2
@@ -117,12 +113,15 @@ EVAL_AND_LOGGING_ARGS=(
     --eval-interval 3000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    ## --load $CHECKPOINT_PATH
-    --wandb-project megatron-training
-    --wandb-exp-name $EXPERIMENT_NAME
-    --wandb-save-dir $WANDB_PATH
+    --load $CHECKPOINT_PATH
+    # --wandb-project megatron-training
+    # --wandb-exp-name MOE-0.6B-btopk-4x
+    # --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard
     --tensorboard-dir $TENSORBOARD_PATH
+    --ckpt-convert-format torch
+    --ckpt-convert-save $CHECKPOINT_PATH_TORCH
+    # --ckpt-step 15000
     # --wandb-project benchmark_training
     # --wandb-exp-name moe8x2-7B
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH

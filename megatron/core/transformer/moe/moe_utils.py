@@ -8,7 +8,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
-
+te_general_gemm = None
 try:
     from megatron.core.extensions.transformer_engine import (
         fused_permute,

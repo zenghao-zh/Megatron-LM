@@ -1089,14 +1089,14 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
             self.fp8_padding = Fp8Padding(self.num_local_experts)
             self.fp8_unpadding = Fp8Unpadding(self.num_local_experts)
         
-        self.predictors = build_module(
-            submodules.predictor,
-            self.num_local_experts,
-            self.config,
-            # submodules.predictor.submodules,
-            model_comm_pgs=model_comm_pgs,
-            act_sparse_training=True,
-        )
+        # self.predictors = build_module(
+        #     submodules.predictor,
+        #     self.num_local_experts,
+        #     self.config,
+        #     # submodules.predictor.submodules,
+        #     model_comm_pgs=model_comm_pgs,
+        #     act_sparse_training=True,
+        # )
 
         self.topk_modules = GroupedBalancedTopkModule(config,
                                                      num_local_experts, 
@@ -1213,16 +1213,25 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                 intermediate_parallel, bias_parallel = self.linear_fc1(
                     permuted_local_hidden_states, tokens_per_expert
                 )
-                intermediate_parallel = bias_act_func(
-                    intermediate_parallel, bias_parallel, permuted_probs
-                )
-                # 原始预测器计算
-                pred_masks = torch.sigmoid(
-                    self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0]
-                )
-                topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
+                # intermediate_parallel = bias_act_func(
+                #     intermediate_parallel, bias_parallel, permuted_probs
+                # )
                 
-            intermediate_parallel = intermediate_parallel * topk_masks
+
+
+                # 原始预测器计算
+            #     pred_masks = torch.sigmoid(
+            #         self.predictors(permuted_local_hidden_states, tokens_per_expert, permuted_probs)[0]
+            #     )
+            #     topk_masks, *_ = self.topk_modules(pred_masks, tokens_per_expert)
+                
+            # intermediate_parallel = intermediate_parallel * topk_masks
+
+            y_1, y_2 = torch.chunk(intermediate_parallel, 2, -1)
+            y_1_topk = self.topk_modules(torch.sigmoid(y_1), tokens_per_expert)[0]
+            intermediate_parallel = y_1_topk*y_1*y_2*permuted_probs.to(y_1.dtype)
+
+            # intermediate_parallel, *_ = self.topk_modules(intermediate_parallel, tokens_per_expert)
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
 
         # upad and concat the output

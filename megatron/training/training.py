@@ -2391,7 +2391,7 @@ def train(
     current_stage = 0
     stage_start_iter = start_iteration
     # 定义训练阶段配置
-    if args.no_load_optim and args.act_sparse_training:
+    if args.load and args.no_load_optim and args.act_sparse_training:
         print_rank_0("Using training stages")
         ## 全部打开训
         training_stages = [

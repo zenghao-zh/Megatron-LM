@@ -5,7 +5,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m
+EXPERIMENT_NAME=smollm-360m-8_1
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -71,16 +71,25 @@ TRAINING_ARGS=(
     --clip-grad 1.0
     --bf16
     ## 激活稀疏训练参数
-    # --act-sparse-training
-    # --act-sparse-predictor-hidden-size 64
-    # --act-sparse-bank-size 64
-    # --act-sparse-topk 16
-    # --act-sparse-btopk-coeff 0.001
-    # --act-sparse-swiglu-without-silu
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 8
+    --act-sparse-btopk-coeff 0.001
+    --act-sparse-swiglu-without-silu
+)
 
-    ## Chain of Expert训练
-    # --use-coe-layer               
-    # --coe-communication-steps 2
+MOE_ARGS=(
+    # --num-experts 64
+    # --moe-grouped-gemm
+    # --moe-router-load-balancing-type aux_loss # options: aux_loss, sinkhorn, none. Default is aux_loss.
+    # --moe-router-topk 8
+    # --moe-router-dtype fp32
+    # --moe-aux-loss-coeff 5e-3
+    # --moe-token-dispatcher-type alltoall
+    # --moe-ffn-hidden-size 40
+    # --moe-shared-expert-intermediate-size 0 # shared-experts 2
+    #--moe-expert-capacity-factor 1.2
 )
 
 MODEL_PARALLEL_ARGS=(

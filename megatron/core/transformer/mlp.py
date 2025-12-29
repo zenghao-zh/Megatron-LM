@@ -64,7 +64,7 @@ class BalancedTopkFunction(torch.autograd.Function):
         bias_reshaped = bias.view(-1, H//bank_size, bank_size)
         
         # 批量计算topk
-        _, topk_indices = (x.abs() + bias_reshaped).topk(k, dim=-1)
+        _, topk_indices = (x + bias_reshaped).topk(k, dim=-1)
         
         # 创建mask
         mask = torch.zeros_like(x, dtype=x.dtype)
@@ -375,6 +375,10 @@ class BalancedTopkMLP(MegatronModule):
             pred_mask = torch.sigmoid(self.predictor(hidden_states)[0])
             topk_mask, *_ = self.topk_module(pred_mask)
             intermediate_parallel = intermediate_parallel * topk_mask
+
+            # gate_proj, up_proj = torch.chunk(intermediate_parallel, 2, -1)
+            # gate_proj_topk = self.topk_module(self.activation_func(gate_proj))[0]
+            # intermediate_parallel = gate_proj_topk*up_proj
         nvtx_range_pop(suffix="predictor")
 
         # [s, b, h]

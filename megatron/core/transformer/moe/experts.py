@@ -1227,9 +1227,9 @@ class TEGroupedBalancedTopkMLP(MegatronModule):
                 
             # intermediate_parallel = intermediate_parallel * topk_masks
 
-            y_1, y_2 = torch.chunk(intermediate_parallel, 2, -1)
-            y_1_topk = self.topk_modules(torch.sigmoid(y_1), tokens_per_expert)[0]
-            intermediate_parallel = y_1_topk*y_1*y_2*permuted_probs.to(y_1.dtype)
+            gate_proj, up_proj = torch.chunk(intermediate_parallel, 2, -1)
+            gate_proj_topk = self.topk_modules(torch.silu(gate_proj), tokens_per_expert)[0]
+            intermediate_parallel = gate_proj_topk*up_proj*permuted_probs.to(gate_proj.dtype)
 
             # intermediate_parallel, *_ = self.topk_modules(intermediate_parallel, tokens_per_expert)
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)

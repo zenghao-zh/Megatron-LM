@@ -50,11 +50,16 @@ MODEL_ARGS=(
     --attention-softmax-in-fp32
     --vocab-size 49152
     # --use-cpu-initialization
+    # INT8 训练现在支持 TransformerEngine 层（默认）和 local 实现
+    # 使用 TransformerEngine（默认）: INT8 通过 forward 包装实现
+    # 使用 local: INT8 通过 tensor subclass 实现（可能更稳定）
+    # --transformer-impl local
+    # --no-persist-layer-norm
 )
 
 TRAINING_ARGS=(
     --seed 3407
-    --micro-batch-size 16
+    --micro-batch-size 4
     --global-batch-size 512
     --lr 3e-3
     --train-samples $MAX_TRAIN_SAMPLES
@@ -71,12 +76,15 @@ TRAINING_ARGS=(
     --clip-grad 1.0
     --bf16
     ## 激活稀疏训练参数
-    --act-sparse-training
-    --act-sparse-predictor-hidden-size 64
-    --act-sparse-bank-size 64
-    --act-sparse-topk 8
-    --act-sparse-btopk-coeff 0.001
-    --act-sparse-swiglu-without-silu
+    # --act-sparse-training
+    # --act-sparse-predictor-hidden-size 64
+    # --act-sparse-bank-size 64
+    # --act-sparse-topk 8
+    # --act-sparse-btopk-coeff 0.001
+    # --act-sparse-swiglu-without-silu
+    --int8-mixed-precision-training
+    --int8-mp-verbose  # 打印每个层的INT8状态
+    # --no-int8-mp-grad-input
 )
 
 MOE_ARGS=(

@@ -1094,6 +1094,22 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # After TE2.x: Below function is an empty function and does nothing.
     correct_amax_history_if_needed(model)
 
+    # INT8 mixed-precision training
+    if getattr(args, 'int8_mixed_precision_training', False):
+        from megatron.core.quantization.int8_training import apply_int8_training_from_args
+        print_rank_0('> Applying INT8 mixed-precision training...')
+        for model_module in model:
+            # Get the underlying module if wrapped in Float16Module
+            if hasattr(model_module, 'module'):
+                apply_int8_training_from_args(model_module.module, args)
+            else:
+                apply_int8_training_from_args(model_module, args)
+        print_rank_0(f'  INT8 config: output={args.int8_mp_output}, '
+                     f'grad_input={args.int8_mp_grad_input}, '
+                     f'grad_weight={args.int8_mp_grad_weight}')
+        if not getattr(args, 'int8_mp_all_layers', False):
+            print_rank_0('  Note: lm_head/output_layer excluded from INT8 for better convergence')
+
     if wrap_with_ddp:
         if args.use_torch_fsdp2:
             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"

@@ -2258,6 +2258,24 @@ def _add_mixed_precision_args(parser):
     group.add_argument('--reuse-grad-buf-for-mxfp8-param-ag', action='store_true',
                        help='If True, reuse the grad buffer for MXFP8 parameter all-gather.')
 
+    # INT8 mixed-precision training arguments
+    group.add_argument('--int8-mixed-precision-training', action='store_true',
+                       help='Enable INT8 mixed-precision training. Uses INT8 Tensor Cores '
+                       'for faster matmul while keeping weights in original precision.')
+    group.add_argument('--no-int8-mp-output', action='store_false', dest='int8_mp_output',
+                       default=True,
+                       help='Disable INT8 for forward matmul. (Default: enabled)')
+    group.add_argument('--no-int8-mp-grad-input', action='store_false', dest='int8_mp_grad_input',
+                       default=True,
+                       help='Disable INT8 for backward grad_input matmul. (Default: enabled)')
+    group.add_argument('--int8-mp-grad-weight', action='store_true',
+                       help='Enable INT8 for backward grad_weight matmul. (Default: disabled for better convergence)')
+    group.add_argument('--int8-mp-all-layers', action='store_true',
+                       help='Apply INT8 to ALL Linear layers including lm_head/output_layer. '
+                       '(Default: exclude lm_head for better convergence)')
+    group.add_argument('--int8-mp-verbose', action='store_true',
+                       help='Print detailed information about which layers have INT8 enabled/disabled.')
+
     return parser
 
 

@@ -5,7 +5,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m-8_1
+EXPERIMENT_NAME=smollm-360m-int8-fw+1bw
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -59,7 +59,7 @@ MODEL_ARGS=(
 
 TRAINING_ARGS=(
     --seed 3407
-    --micro-batch-size 4
+    --micro-batch-size 16
     --global-batch-size 512
     --lr 3e-3
     --train-samples $MAX_TRAIN_SAMPLES

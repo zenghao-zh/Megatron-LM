@@ -16,7 +16,7 @@ WANDB_PATH=/root/workspace/Megatron-LM/wandb
 TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
 MAX_TRAIN_SAMPLES=50000000
-LR_WARMUP_SAMPLES=$(( 5000 * 2048 ))
+LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
 
 
 DISTRIBUTED_ARGS=(
@@ -83,7 +83,8 @@ TRAINING_ARGS=(
     # --act-sparse-btopk-coeff 0.001
     # --act-sparse-swiglu-without-silu
     --int8-mixed-precision-training
-    --int8-mp-verbose  # 打印每个层的INT8状态
+    # --int8-mp-verbose  # 打印每个层的INT8状态
+    --int8-mp-group-size 16
     # --no-int8-mp-grad-input
 )
 

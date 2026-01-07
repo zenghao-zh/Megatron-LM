@@ -1106,7 +1106,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 apply_int8_training_from_args(model_module, args)
         print_rank_0(f'  INT8 config: output={args.int8_mp_output}, '
                      f'grad_input={args.int8_mp_grad_input}, '
-                     f'grad_weight={args.int8_mp_grad_weight}')
+                     f'grad_weight={args.int8_mp_grad_weight}, '
+                     f'group_size={args.int8_mp_group_size}')
         if not getattr(args, 'int8_mp_all_layers', False):
             print_rank_0('  Note: lm_head/output_layer excluded from INT8 for better convergence')
 

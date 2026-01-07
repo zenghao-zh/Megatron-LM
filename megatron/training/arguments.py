@@ -2270,6 +2270,10 @@ def _add_mixed_precision_args(parser):
                        help='Disable INT8 for backward grad_input matmul. (Default: enabled)')
     group.add_argument('--int8-mp-grad-weight', action='store_true',
                        help='Enable INT8 for backward grad_weight matmul. (Default: disabled for better convergence)')
+    group.add_argument('--int8-mp-group-size', type=int, default=64,
+                       help='Quantization group size along K dimension. '
+                       '0=row-wise (one scale per row), 64=group-wise (one scale per 64 elements). '
+                       'Group-wise is recommended for Tensor Parallelism. (Default: 64)')
     group.add_argument('--int8-mp-all-layers', action='store_true',
                        help='Apply INT8 to ALL Linear layers including lm_head/output_layer. '
                        '(Default: exclude lm_head for better convergence)')

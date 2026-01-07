@@ -25,19 +25,27 @@ class Int8MixedPrecisionTrainingConfig:
     
     Attributes:
         output: Apply INT8 to forward matmul (default: True)
-        grad_input: Apply INT8 to backward grad_input matmul (default: True)  
+        grad_input: Apply INT8 to backward grad_input matmul (default: False)
+            Note: Disabling grad_input INT8 is recommended - gradient errors accumulate
+            across layers and hurt convergence more than forward errors.
         grad_weight: Apply INT8 to backward grad_weight matmul (default: False)
             Note: Disabling grad_weight INT8 is recommended for better convergence
+        group_size: Quantization granularity along K dimension (default: 64)
+            - 0: Row-wise quantization (one scale per row)
+            - 64: Group-wise quantization (one scale per 64 elements)
+            Group-wise is recommended for Tensor Parallelism compatibility.
     """
     output: bool = True
     grad_input: bool = True
     grad_weight: bool = False  # Default False for better convergence
+    group_size: int = 64  # Default 64 for TP compatibility
     
     def __repr__(self):
         return (
             f"Int8MixedPrecisionTrainingConfig("
             f"output={self.output}, "
             f"grad_input={self.grad_input}, "
-            f"grad_weight={self.grad_weight})"
+            f"grad_weight={self.grad_weight}, "
+            f"group_size={self.group_size})"
         )
 

@@ -69,6 +69,30 @@ if HAS_TRITON:
         )
         for BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps in _CONFIGS
     ]
+    
+    # Group-wise kernel configs - BLOCK_K must be divisor of group_size
+    # For group_size=64, use BLOCK_K in {32, 64}
+    _GROUPWISE_CONFIGS = [
+        (128, 256, 64, 3, 8),
+        (64, 256, 64, 4, 4),
+        (128, 128, 64, 4, 4),
+        (128, 64, 64, 4, 4),
+        (64, 128, 64, 4, 4),
+        (64, 64, 64, 3, 8),
+        (128, 128, 32, 4, 4),
+        (64, 64, 32, 2, 4),
+        (128, 64, 32, 3, 4),
+        (64, 128, 32, 3, 4),
+    ]
+    
+    _groupwise_triton_configs = [
+        triton.Config(
+            dict(BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K),
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps in _GROUPWISE_CONFIGS
+    ]
 
     @triton.autotune(configs=_triton_configs, key=["M", "N", "K", "stride_ak", "stride_bk"])
     @triton.heuristics({"EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0})
@@ -144,6 +168,108 @@ if HAS_TRITON:
         xindex = idx_m * stride_cm + idx_n * stride_cn
         tl.store(C_ptr + tl.broadcast_to(xindex, mask.shape), acc, mask)
 
+    @triton.autotune(configs=_groupwise_triton_configs, key=["M", "N", "K", "GROUP_SIZE"])
+    @triton.jit
+    def _scaled_int8_mm_groupwise_kernel(
+        A_ptr,
+        B_ptr,
+        C_ptr,
+        A_scale_ptr,  # [M, num_groups]
+        B_scale_ptr,  # [N, num_groups]
+        M,
+        N,
+        K,
+        num_groups,
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        stride_cm,
+        stride_cn,
+        stride_as_m,  # A_scale stride for M dimension
+        stride_as_g,  # A_scale stride for group dimension
+        stride_bs_n,  # B_scale stride for N dimension  
+        stride_bs_g,  # B_scale stride for group dimension
+        GROUP_SIZE: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        GROUP_M: tl.constexpr = 8,
+    ):
+        """Triton kernel for group-wise scaled INT8 matrix multiplication.
+        
+        Each group of GROUP_SIZE elements along K has its own scale factor.
+        The accumulator is float32 to handle per-group scaling.
+        """
+        pid = tl.program_id(0)
+        grid_m = (M + BLOCK_M - 1) // BLOCK_M
+        grid_n = (N + BLOCK_N - 1) // BLOCK_N
+
+        # Re-order program ID for better L2 performance
+        width = GROUP_M * grid_n
+        group_id = pid // width
+        group_sz = min(grid_m - group_id * GROUP_M, GROUP_M)
+        pid_m = group_id * GROUP_M + (pid % group_sz)
+        pid_n = (pid % width) // group_sz
+
+        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+        rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
+        
+        # Float32 accumulator for group-wise scaling
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        
+        # Iterate over K dimension in blocks
+        # Track which group we're in based on k position
+        k_start = 0
+        for k_block in range(0, K, BLOCK_K):
+            rk = tl.arange(0, BLOCK_K)
+            
+            # Load A and B blocks
+            A = A_ptr + (ram[:, None] * stride_am + (k_block + rk[None, :]) * stride_ak)
+            B = B_ptr + ((k_block + rk[:, None]) * stride_bk + rbn[None, :] * stride_bn)
+            
+            # Mask for K boundary
+            k_mask = (k_block + rk) < K
+            a = tl.load(A, mask=k_mask[None, :], other=0)
+            b = tl.load(B, mask=k_mask[:, None], other=0)
+            
+            # INT8 dot product -> int32
+            partial = tl.dot(a, b).to(tl.float32)
+            
+            # Determine which group this k_block belongs to
+            # For simplicity, we handle the case where BLOCK_K divides GROUP_SIZE
+            # or GROUP_SIZE divides BLOCK_K
+            group_idx = k_block // GROUP_SIZE
+            
+            # Load scales for this group
+            # A_scale: [M, num_groups], B_scale: [N, num_groups]
+            idx_m = rm[:, None]
+            idx_n = rn[None, :]
+            
+            a_scale = tl.load(
+                A_scale_ptr + idx_m * stride_as_m + group_idx * stride_as_g,
+                mask=idx_m < M
+            ).to(tl.float32)
+            b_scale = tl.load(
+                B_scale_ptr + idx_n * stride_bs_n + group_idx * stride_bs_g,
+                mask=idx_n < N
+            ).to(tl.float32)
+            
+            # Apply per-group scaling and accumulate
+            acc += partial * a_scale * b_scale
+
+        # Store result
+        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        idx_m = rm[:, None]
+        idx_n = rn[None, :]
+        mask = (idx_m < M) & (idx_n < N)
+        
+        xindex = idx_m * stride_cm + idx_n * stride_cn
+        tl.store(C_ptr + tl.broadcast_to(xindex, mask.shape), acc, mask)
+
 
 def scaled_int8_mm(
     A: Tensor, B: Tensor, row_scale: Tensor, col_scale: Tensor
@@ -199,6 +325,85 @@ def scaled_int8_mm(
     return C
 
 
+def scaled_int8_mm_groupwise(
+    A: Tensor, B: Tensor, A_scale: Tensor, B_scale: Tensor, group_size: int = 64
+) -> Tensor:
+    """Compute group-wise scaled INT8 matmul: A @ B with per-group scaling.
+    
+    Each group of `group_size` elements along K dimension has its own scale.
+    This is useful for Tensor Parallelism compatibility.
+    
+    Args:
+        A: INT8 tensor of shape (M, K)
+        B: INT8 tensor of shape (K, N)
+        A_scale: Scale tensor of shape (M, num_groups) where num_groups = ceil(K/group_size)
+        B_scale: Scale tensor of shape (N, num_groups)
+        group_size: Number of elements per group (default: 64)
+        
+    Returns:
+        Result tensor of shape (M, N) with dtype matching scale tensors
+    """
+    if not HAS_TRITON:
+        # Fallback: loop over groups
+        M, K = A.shape
+        _, N = B.shape
+        num_groups = (K + group_size - 1) // group_size
+        result = torch.zeros(M, N, device=A.device, dtype=A_scale.dtype)
+        
+        for g in range(num_groups):
+            k_start = g * group_size
+            k_end = min((g + 1) * group_size, K)
+            A_g = A[:, k_start:k_end]
+            B_g = B[k_start:k_end, :]
+            # Dequantize and accumulate
+            A_dq = A_g.float() * A_scale[:, g:g+1]
+            B_dq = B_g.float() * B_scale[:, g:g+1].T
+            result += A_dq @ B_dq
+        return result.to(A_scale.dtype)
+    
+    assert A.dtype is torch.int8 and B.dtype is torch.int8
+    assert A_scale.dtype is B_scale.dtype
+    assert A.shape[1] == B.shape[0]
+    
+    M, K = A.shape
+    _, N = B.shape
+    num_groups = (K + group_size - 1) // group_size
+    
+    assert A_scale.shape == (M, num_groups), f"A_scale shape {A_scale.shape} != ({M}, {num_groups})"
+    assert B_scale.shape == (N, num_groups), f"B_scale shape {B_scale.shape} != ({N}, {num_groups})"
+    
+    # Ensure contiguous
+    A = A.contiguous()
+    B = B.contiguous()
+    A_scale = A_scale.contiguous()
+    B_scale = B_scale.contiguous()
+    
+    C = torch.empty(M, N, device=A.device, dtype=A_scale.dtype)
+    
+    grid = lambda meta: (
+        triton.cdiv(M, meta["BLOCK_M"]) * triton.cdiv(N, meta["BLOCK_N"]),
+    )
+    
+    _scaled_int8_mm_groupwise_kernel[grid](
+        A,
+        B,
+        C,
+        A_scale,
+        B_scale,
+        M,
+        N,
+        K,
+        num_groups,
+        *A.stride(),
+        *B.stride(),
+        *C.stride(),
+        *A_scale.stride(),
+        *B_scale.stride(),
+        GROUP_SIZE=group_size,
+    )
+    return C
+
+
 @torch.no_grad()
 def quantize_int8_rowwise(
     tensor: Tensor, stochastic_rounding: bool = False, eps: float = 1e-8
@@ -231,4 +436,63 @@ def quantize_int8_rowwise(
     # This avoids numerical asymmetry when dequantizing
     tensor = tensor.clip(-127, 127).to(torch.int8)
     return tensor, scale
+
+
+@torch.no_grad()
+def quantize_int8_groupwise(
+    tensor: Tensor, group_size: int = 64, stochastic_rounding: bool = False, eps: float = 1e-8
+):
+    """Quantize a tensor to INT8 with group-wise scaling along K dimension.
+    
+    Each group of `group_size` elements shares a scale factor.
+    This is useful for Tensor Parallelism where K dimension may be split.
+    
+    Args:
+        tensor: Input tensor of shape [M, K]
+        group_size: Number of elements per group (default: 64)
+        stochastic_rounding: If True, use stochastic rounding
+        eps: Small value to prevent division by zero
+        
+    Returns:
+        Tuple of (int8_tensor [M, K], scales [M, num_groups])
+    """
+    M, K = tensor.shape
+    
+    # Handle case where K is not divisible by group_size
+    if K % group_size != 0:
+        # Pad K to be divisible by group_size
+        pad_size = group_size - (K % group_size)
+        tensor = torch.nn.functional.pad(tensor, (0, pad_size), value=0)
+        K_padded = K + pad_size
+    else:
+        K_padded = K
+        pad_size = 0
+    
+    num_groups = K_padded // group_size
+    
+    # Reshape to [M, num_groups, group_size]
+    tensor_grouped = tensor.reshape(M, num_groups, group_size)
+    
+    # Compute scale per group: [M, num_groups]
+    scales = tensor_grouped.abs().amax(dim=2) / 127
+    
+    # Quantize
+    inv_scales = 1.0 / scales.float().clip(min=eps)
+    tensor_grouped = tensor_grouped.float() * inv_scales.unsqueeze(-1)
+    
+    if stochastic_rounding:
+        tensor_grouped = (tensor_grouped + torch.rand_like(tensor_grouped)).floor()
+    else:
+        tensor_grouped = tensor_grouped.round()
+    
+    tensor_grouped = tensor_grouped.clip(-127, 127).to(torch.int8)
+    
+    # Reshape back to [M, K_padded]
+    int8_tensor = tensor_grouped.reshape(M, K_padded)
+    
+    # Remove padding if applied
+    if pad_size > 0:
+        int8_tensor = int8_tensor[:, :K]
+    
+    return int8_tensor, scales
 

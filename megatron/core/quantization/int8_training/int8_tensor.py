@@ -22,7 +22,12 @@ import torch.utils._pytree as pytree
 from torch import Tensor, nn
 
 from .config import Int8MixedPrecisionTrainingConfig
-from .int8_mm import quantize_int8_rowwise, scaled_int8_mm
+from .int8_mm import (
+    quantize_int8_rowwise, 
+    quantize_int8_groupwise,
+    scaled_int8_mm,
+    scaled_int8_mm_groupwise,
+)
 
 
 aten = torch.ops.aten
@@ -207,15 +212,15 @@ _INT8_MM_CALL_COUNT = 0
 _INT8_MM_DEBUG = False  # Set to True to verify INT8 is being called
 
 
-def _dynamic_int8_mm(A: Tensor, B: Tensor) -> Tensor:
+def _dynamic_int8_mm(A: Tensor, B: Tensor, group_size: int = 0) -> Tensor:
     """Dynamically quantize A and B to INT8 for matmul, then scale back.
     
-    Uses row-wise scaling for A and column-wise scaling for B to allow
-    fusing the scaling into the matmul output.
+    Supports both row-wise (group_size=0) and group-wise (group_size>0) quantization.
     
     Args:
         A: Activation tensor, may have more than 2 dims
         B: Weight tensor, must be exactly 2-dim
+        group_size: Quantization granularity. 0=row-wise, >0=group-wise
         
     Returns:
         Result tensor in original precision
@@ -224,11 +229,16 @@ def _dynamic_int8_mm(A: Tensor, B: Tensor) -> Tensor:
     _INT8_MM_CALL_COUNT += 1
     if _INT8_MM_DEBUG and _INT8_MM_CALL_COUNT <= 10:
         print(f"[INT8] _dynamic_int8_mm called #{_INT8_MM_CALL_COUNT}: "
-              f"A.shape={tuple(A.shape)}, B.shape={tuple(B.shape)}")
+              f"A.shape={tuple(A.shape)}, B.shape={tuple(B.shape)}, group_size={group_size}")
     
     # A may have more than 2 dims, while B must be exactly 2-dim
     A_2d = A.reshape(-1, A.shape[-1])
     
+    if group_size > 0:
+        # Group-wise quantization
+        return _dynamic_int8_mm_groupwise(A, B, group_size)
+    
+    # Row-wise quantization (original implementation)
     # Quantize A row-wise
     A_i8, A_scale_rowwise = quantize_int8_rowwise(A_2d.contiguous())
     
@@ -248,6 +258,50 @@ def _dynamic_int8_mm(A: Tensor, B: Tensor) -> Tensor:
         B_scale_colwise.contiguous(),
     )
     return out.view(*A.shape[:-1], out.shape[-1])
+
+
+def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64) -> Tensor:
+    """Dynamically quantize A and B to INT8 with group-wise scaling.
+    
+    Each group of `group_size` elements along K dimension has its own scale.
+    
+    Args:
+        A: Activation tensor [..., K]
+        B: Weight tensor [K, N]
+        group_size: Number of elements per quantization group
+        
+    Returns:
+        Result tensor in original precision
+    """
+    # A may have more than 2 dims
+    orig_shape = A.shape
+    A_2d = A.reshape(-1, A.shape[-1])  # [M, K]
+    K = A_2d.shape[-1]
+    
+    # Quantize A with group-wise scaling along K
+    A_i8, A_scales = quantize_int8_groupwise(A_2d.contiguous(), group_size)
+    # A_i8: [M, K], A_scales: [M, num_groups]
+    
+    # Quantize B with group-wise scaling along K (B is [K, N])
+    # We need to quantize along K dimension (rows of B)
+    # Transpose to [N, K], quantize, then transpose back
+    B_t = B.T.contiguous()  # [N, K]
+    B_t_i8, B_scales = quantize_int8_groupwise(B_t, group_size)
+    # B_t_i8: [N, K], B_scales: [N, num_groups]
+    
+    # For matmul A @ B, we need B in [K, N] format
+    B_i8 = B_t_i8.T.contiguous()  # [K, N]
+    
+    # Group-wise scaled matmul
+    out = scaled_int8_mm_groupwise(
+        A_i8.contiguous(),
+        B_i8,
+        A_scales.contiguous(),
+        B_scales.contiguous(),
+        group_size,
+    )
+    
+    return out.view(*orig_shape[:-1], out.shape[-1])
 
 
 class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
@@ -272,9 +326,10 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
 
         # Cast weight to input dtype if needed
         weight = weight.to(input.dtype)
+        group_size = config.group_size
 
         if config.output:
-            out = _dynamic_int8_mm(input, weight.T)
+            out = _dynamic_int8_mm(input, weight.T, group_size)
         else:
             out = input @ weight.T
         out = out + bias if bias is not None else out
@@ -284,20 +339,22 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         weight = weight.to(input.dtype)
+        config = ctx.config
+        group_size = config.group_size
 
         grad_input = grad_weight = grad_bias = None
 
         if ctx.needs_input_grad[0]:
-            if ctx.config.grad_input:
-                grad_input = _dynamic_int8_mm(grad_output, weight)
+            if config.grad_input:
+                grad_input = _dynamic_int8_mm(grad_output, weight, group_size)
             else:
                 grad_input = grad_output @ weight
 
         if ctx.needs_input_grad[1]:
             grad_output_2d = grad_output.view(-1, weight.shape[0])
             input_2d = input.view(-1, weight.shape[1])
-            if ctx.config.grad_weight:
-                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d).T
+            if config.grad_weight:
+                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d, group_size).T
             else:
                 grad_weight = grad_output_2d.T @ input_2d
 
@@ -331,9 +388,10 @@ class _Int8MatmulFunction(torch.autograd.Function):
         """
         ctx.config = config
         ctx.save_for_backward(input, weight_data)
+        group_size = config.group_size
         
         if config.output:
-            out = _dynamic_int8_mm(input, weight_data)
+            out = _dynamic_int8_mm(input, weight_data, group_size)
         else:
             out = input @ weight_data
         return out
@@ -342,13 +400,14 @@ class _Int8MatmulFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight_data = ctx.saved_tensors
         config = ctx.config
+        group_size = config.group_size
         
         grad_input = grad_weight = None
         
         # grad_input = grad_output @ weight_data.T
         if ctx.needs_input_grad[0]:
             if config.grad_input:
-                grad_input = _dynamic_int8_mm(grad_output, weight_data.T)
+                grad_input = _dynamic_int8_mm(grad_output, weight_data.T, group_size)
             else:
                 grad_input = grad_output @ weight_data.T
         
@@ -358,7 +417,7 @@ class _Int8MatmulFunction(torch.autograd.Function):
             input_2d = input.reshape(-1, input.shape[-1])  # [batch, K]
             grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])  # [batch, N]
             if config.grad_weight:
-                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d)  # [K, N]
+                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d, group_size)  # [K, N]
             else:
                 grad_weight = input_2d.T @ grad_output_2d  # [K, N]
         
@@ -388,7 +447,7 @@ def _int8_mm_dispatch(func, types, args, kwargs):
         # This typically happens in grad_weight computation
         config = A.config
         if config.grad_weight:
-            return _dynamic_int8_mm(A._data, B)
+            return _dynamic_int8_mm(A._data, B, config.group_size)
         else:
             return A._data @ B
     
@@ -409,7 +468,7 @@ def _int8_matmul_dispatch(func, types, args, kwargs):
         if isinstance(A, Int8MixedPrecisionTrainingLinearWeight):
             config = A.config
             if config.grad_weight:
-                return _dynamic_int8_mm(A._data, B)
+                return _dynamic_int8_mm(A._data, B, config.group_size)
             else:
                 return A._data @ B
     
@@ -420,7 +479,7 @@ def _int8_matmul_dispatch(func, types, args, kwargs):
     if isinstance(A, Int8MixedPrecisionTrainingLinearWeight):
         config = A.config
         if config.grad_weight:
-            return _dynamic_int8_mm(A._data, B)
+            return _dynamic_int8_mm(A._data, B, config.group_size)
         else:
             return A._data @ B
     

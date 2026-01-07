@@ -140,10 +140,12 @@ class _Int8TELinearFunction(torch.autograd.Function):
         ctx.has_bias = bias is not None
         ctx.te_return_bias = te_return_bias
         
+        group_size = config.group_size
+        
         # Forward: output = input @ weight.T + bias
         # TE Linear stores weight as [out_features, in_features]
         if config.output:
-            out = _dynamic_int8_mm(input, weight.T)
+            out = _dynamic_int8_mm(input, weight.T, group_size)
         else:
             out = input @ weight.T
         
@@ -163,13 +165,14 @@ class _Int8TELinearFunction(torch.autograd.Function):
         
         input, weight = ctx.saved_tensors
         config = ctx.config
+        group_size = config.group_size
         
         grad_input = grad_weight = grad_bias = None
         
         # grad_input = grad_output @ weight
         if ctx.needs_input_grad[0]:
             if config.grad_input and grad_output is not None:
-                grad_input = _dynamic_int8_mm(grad_output, weight)
+                grad_input = _dynamic_int8_mm(grad_output, weight, group_size)
             elif grad_output is not None:
                 grad_input = grad_output @ weight
         
@@ -180,7 +183,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
             grad_output_2d = grad_output.reshape(-1, weight.shape[0])
             input_2d = input.reshape(-1, weight.shape[1])
             if config.grad_weight:
-                grad_weight = _dynamic_int8_mm(grad_output_2d.T, input_2d)
+                grad_weight = _dynamic_int8_mm(grad_output_2d.T, input_2d, group_size)
             else:
                 grad_weight = grad_output_2d.T @ input_2d
         
@@ -386,6 +389,7 @@ def apply_int8_training_from_args(model, args):
         output=getattr(args, 'int8_mp_output', True),
         grad_input=getattr(args, 'int8_mp_grad_input', True),
         grad_weight=getattr(args, 'int8_mp_grad_weight', False),
+        group_size=getattr(args, 'int8_mp_group_size', 64),
     )
     
     # Use default filter to exclude lm_head unless user explicitly wants all layers

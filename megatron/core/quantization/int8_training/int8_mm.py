@@ -70,29 +70,63 @@ if HAS_TRITON:
         for BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps in _CONFIGS
     ]
     
-    # Group-wise kernel configs - BLOCK_K must be divisor of group_size
-    # For group_size=64, use BLOCK_K in {32, 64}
-    _GROUPWISE_CONFIGS = [
-        (128, 256, 64, 3, 8),
-        (64, 256, 64, 4, 4),
-        (128, 128, 64, 4, 4),
-        (128, 64, 64, 4, 4),
-        (64, 128, 64, 4, 4),
-        (64, 64, 64, 3, 8),
-        (128, 128, 32, 4, 4),
-        (64, 64, 32, 2, 4),
-        (128, 64, 32, 3, 4),
-        (64, 128, 32, 3, 4),
-    ]
+    # Group-wise kernel configs
+    # IMPORTANT: BLOCK_K must equal GROUP_SIZE for correct scaling!
+    # We create separate config sets for different group sizes
     
-    _groupwise_triton_configs = [
-        triton.Config(
-            dict(BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K),
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
-        for BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps in _GROUPWISE_CONFIGS
-    ]
+    def _make_groupwise_configs(block_k):
+        """Create autotune configs for a specific BLOCK_K (= GROUP_SIZE).
+        
+        Note: For smaller BLOCK_K (e.g., 16), we use fewer warps to avoid
+        issues with shared memory and register pressure.
+        """
+        if block_k >= 64:
+            configs = [
+                (128, 256, block_k, 3, 8),
+                (64, 256, block_k, 4, 4),
+                (128, 128, block_k, 4, 4),
+                (128, 64, block_k, 4, 4),
+                (64, 128, block_k, 4, 4),
+                (64, 64, block_k, 3, 8),
+                (32, 64, block_k, 3, 4),
+                (64, 32, block_k, 3, 4),
+                (32, 32, block_k, 2, 4),
+            ]
+        elif block_k >= 32:
+            configs = [
+                (128, 128, block_k, 3, 4),
+                (64, 128, block_k, 3, 4),
+                (128, 64, block_k, 3, 4),
+                (64, 64, block_k, 3, 4),
+                (32, 64, block_k, 2, 4),
+                (64, 32, block_k, 2, 4),
+                (32, 32, block_k, 2, 4),
+            ]
+        else:  # block_k == 16
+            # For small BLOCK_K, use conservative settings
+            configs = [
+                (64, 64, block_k, 2, 4),
+                (32, 64, block_k, 2, 4),
+                (64, 32, block_k, 2, 4),
+                (32, 32, block_k, 2, 4),
+                (32, 32, block_k, 2, 2),
+            ]
+        return [
+            triton.Config(
+                dict(BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K),
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps in configs
+        ]
+    
+    # Pre-built configs for common group sizes
+    _groupwise_configs_16 = _make_groupwise_configs(16)
+    _groupwise_configs_32 = _make_groupwise_configs(32)
+    _groupwise_configs_64 = _make_groupwise_configs(64)
+    
+    # Default configs (for group_size=64)
+    _groupwise_triton_configs = _groupwise_configs_64
 
     @triton.autotune(configs=_triton_configs, key=["M", "N", "K", "stride_ak", "stride_bk"])
     @triton.heuristics({"EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0})
@@ -168,107 +202,97 @@ if HAS_TRITON:
         xindex = idx_m * stride_cm + idx_n * stride_cn
         tl.store(C_ptr + tl.broadcast_to(xindex, mask.shape), acc, mask)
 
-    @triton.autotune(configs=_groupwise_triton_configs, key=["M", "N", "K", "GROUP_SIZE"])
-    @triton.jit
-    def _scaled_int8_mm_groupwise_kernel(
-        A_ptr,
-        B_ptr,
-        C_ptr,
-        A_scale_ptr,  # [M, num_groups]
-        B_scale_ptr,  # [N, num_groups]
-        M,
-        N,
-        K,
-        num_groups,
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_cm,
-        stride_cn,
-        stride_as_m,  # A_scale stride for M dimension
-        stride_as_g,  # A_scale stride for group dimension
-        stride_bs_n,  # B_scale stride for N dimension  
-        stride_bs_g,  # B_scale stride for group dimension
-        GROUP_SIZE: tl.constexpr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-        GROUP_M: tl.constexpr = 8,
-    ):
-        """Triton kernel for group-wise scaled INT8 matrix multiplication.
+    # Use a factory function to create kernels for different group sizes
+    # This avoids issues with nested JIT calls while still sharing the logic
+    
+    def _make_groupwise_kernel(group_size, configs):
+        """Factory function to create a groupwise matmul kernel for a specific group size."""
         
-        Each group of GROUP_SIZE elements along K has its own scale factor.
-        The accumulator is float32 to handle per-group scaling.
-        """
-        pid = tl.program_id(0)
-        grid_m = (M + BLOCK_M - 1) // BLOCK_M
-        grid_n = (N + BLOCK_N - 1) // BLOCK_N
+        @triton.autotune(configs=configs, key=["M", "N", "K"])
+        @triton.jit
+        def kernel(
+            A_ptr, B_ptr, C_ptr, A_scale_ptr, B_scale_ptr,
+            M, N, K, num_groups,
+            stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+            stride_as_m, stride_as_g, stride_bs_n, stride_bs_g,
+            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+            GROUP_M: tl.constexpr = 8,
+        ):
+            """Triton kernel for group-wise scaled INT8 matrix multiplication.
+            
+            IMPORTANT: BLOCK_K must equal GROUP_SIZE for correct scaling!
+            Each group of GROUP_SIZE elements along K has its own scale factor.
+            """
+            pid = tl.program_id(0)
+            grid_m = (M + BLOCK_M - 1) // BLOCK_M
+            grid_n = (N + BLOCK_N - 1) // BLOCK_N
 
-        # Re-order program ID for better L2 performance
-        width = GROUP_M * grid_n
-        group_id = pid // width
-        group_sz = min(grid_m - group_id * GROUP_M, GROUP_M)
-        pid_m = group_id * GROUP_M + (pid % group_sz)
-        pid_n = (pid % width) // group_sz
+            # Re-order program ID for better L2 performance
+            width = GROUP_M * grid_n
+            group_id = pid // width
+            group_sz = min(grid_m - group_id * GROUP_M, GROUP_M)
+            pid_m = group_id * GROUP_M + (pid % group_sz)
+            pid_n = (pid % width) // group_sz
 
-        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
-        rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
-        
-        # Float32 accumulator for group-wise scaling
-        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        
-        # Iterate over K dimension in blocks
-        # Track which group we're in based on k position
-        k_start = 0
-        for k_block in range(0, K, BLOCK_K):
-            rk = tl.arange(0, BLOCK_K)
+            rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+            ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+            rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
             
-            # Load A and B blocks
-            A = A_ptr + (ram[:, None] * stride_am + (k_block + rk[None, :]) * stride_ak)
-            B = B_ptr + ((k_block + rk[:, None]) * stride_bk + rbn[None, :] * stride_bn)
+            # Float32 accumulator for group-wise scaling
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             
-            # Mask for K boundary
-            k_mask = (k_block + rk) < K
-            a = tl.load(A, mask=k_mask[None, :], other=0)
-            b = tl.load(B, mask=k_mask[:, None], other=0)
-            
-            # INT8 dot product -> int32
-            partial = tl.dot(a, b).to(tl.float32)
-            
-            # Determine which group this k_block belongs to
-            # For simplicity, we handle the case where BLOCK_K divides GROUP_SIZE
-            # or GROUP_SIZE divides BLOCK_K
-            group_idx = k_block // GROUP_SIZE
-            
-            # Load scales for this group
-            # A_scale: [M, num_groups], B_scale: [N, num_groups]
+            # Iterate over K dimension in blocks of BLOCK_K (= GROUP_SIZE)
+            for k_block in range(0, K, BLOCK_K):
+                rk = tl.arange(0, BLOCK_K)
+                
+                # Load A and B blocks
+                A = A_ptr + (ram[:, None] * stride_am + (k_block + rk[None, :]) * stride_ak)
+                B = B_ptr + ((k_block + rk[:, None]) * stride_bk + rbn[None, :] * stride_bn)
+                
+                # Mask for K boundary
+                k_mask = (k_block + rk) < K
+                a = tl.load(A, mask=k_mask[None, :], other=0)
+                b = tl.load(B, mask=k_mask[:, None], other=0)
+                
+                # INT8 dot product -> int32
+                partial = tl.dot(a, b).to(tl.float32)
+                
+                # BLOCK_K == GROUP_SIZE, so group_idx = k_block // BLOCK_K
+                group_idx = k_block // BLOCK_K
+                
+                # Load scales for this group
+                idx_m = rm[:, None]
+                idx_n = rn[None, :]
+                
+                a_scale = tl.load(
+                    A_scale_ptr + idx_m * stride_as_m + group_idx * stride_as_g,
+                    mask=idx_m < M
+                ).to(tl.float32)
+                b_scale = tl.load(
+                    B_scale_ptr + idx_n * stride_bs_n + group_idx * stride_bs_g,
+                    mask=idx_n < N
+                ).to(tl.float32)
+                
+                # Apply per-group scaling and accumulate
+                acc += partial * a_scale * b_scale
+
+            # Store result
+            rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
             idx_m = rm[:, None]
             idx_n = rn[None, :]
+            mask = (idx_m < M) & (idx_n < N)
             
-            a_scale = tl.load(
-                A_scale_ptr + idx_m * stride_as_m + group_idx * stride_as_g,
-                mask=idx_m < M
-            ).to(tl.float32)
-            b_scale = tl.load(
-                B_scale_ptr + idx_n * stride_bs_n + group_idx * stride_bs_g,
-                mask=idx_n < N
-            ).to(tl.float32)
-            
-            # Apply per-group scaling and accumulate
-            acc += partial * a_scale * b_scale
-
-        # Store result
-        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        idx_m = rm[:, None]
-        idx_n = rn[None, :]
-        mask = (idx_m < M) & (idx_n < N)
+            xindex = idx_m * stride_cm + idx_n * stride_cn
+            tl.store(C_ptr + tl.broadcast_to(xindex, mask.shape), acc, mask)
         
-        xindex = idx_m * stride_cm + idx_n * stride_cn
-        tl.store(C_ptr + tl.broadcast_to(xindex, mask.shape), acc, mask)
+        return kernel
+    
+    # Pre-build kernels for each supported group size
+    _scaled_int8_mm_groupwise_kernel_g16 = _make_groupwise_kernel(16, _groupwise_configs_16)
+    _scaled_int8_mm_groupwise_kernel_g32 = _make_groupwise_kernel(32, _groupwise_configs_32)
+    _scaled_int8_mm_groupwise_kernel_g64 = _make_groupwise_kernel(64, _groupwise_configs_64)
 
 
 def scaled_int8_mm(
@@ -384,7 +408,18 @@ def scaled_int8_mm_groupwise(
         triton.cdiv(M, meta["BLOCK_M"]) * triton.cdiv(N, meta["BLOCK_N"]),
     )
     
-    _scaled_int8_mm_groupwise_kernel[grid](
+    # Select the correct kernel based on group_size
+    # Each kernel has BLOCK_K == group_size to ensure correct scaling
+    if group_size == 16:
+        kernel = _scaled_int8_mm_groupwise_kernel_g16
+    elif group_size == 32:
+        kernel = _scaled_int8_mm_groupwise_kernel_g32
+    elif group_size == 64:
+        kernel = _scaled_int8_mm_groupwise_kernel_g64
+    else:
+        raise ValueError(f"Unsupported group_size={group_size}. Must be 16, 32, or 64.")
+    
+    kernel[grid](
         A,
         B,
         C,
@@ -399,7 +434,6 @@ def scaled_int8_mm_groupwise(
         *C.stride(),
         *A_scale.stride(),
         *B_scale.stride(),
-        GROUP_SIZE=group_size,
     )
     return C
 

@@ -30,6 +30,7 @@ Usage:
 """
 
 import torch
+import types
 import torch.nn as nn
 
 from .config import Int8MixedPrecisionTrainingConfig
@@ -197,7 +198,7 @@ def _wrap_te_layer(module, config):
     This replaces the TE layer's forward with INT8 quantized matmul for both
     forward and backward passes, providing full INT8 acceleration.
     """
-    import types
+    # import types
     
     # Check if it's a TE Linear-like layer with weight
     if not hasattr(module, 'weight') or module.weight is None:
@@ -331,11 +332,14 @@ def apply_int8_training(
 
 
 def _default_int8_filter(name, module):
-    """Default filter: exclude lm_head and output layers which are sensitive to quantization.
+    """Default filter: exclude lm_head, output layers, and attention layers.
     
-    These layers directly affect output logits and are more sensitive to INT8 precision loss.
-    Excluding them significantly improves training convergence while still getting speedup
-    from INT8 on the bulk of the model (attention projections and FFN layers).
+    These layers are more sensitive to INT8 precision loss:
+    - lm_head/output_layer: directly affect output logits
+    - attention layers (Q/K/V/O projections): critical for model quality
+    
+    By excluding them, we apply INT8 only to FFN layers which are more robust
+    to quantization while still providing significant speedup.
     """
     # Exclude output/lm_head layers - they're sensitive to quantization
     exclude_patterns = [
@@ -343,7 +347,20 @@ def _default_int8_filter(name, module):
         'output_layer', 
         'final_linear',
         'head',
-        'output',  # Common name for output projection
+        # Attention projection layers (Q, K, V, O)
+        'query',           # query projection
+        'key',             # key projection  
+        'value',           # value projection
+        'q_proj',          # alternative naming
+        'k_proj',
+        'v_proj',
+        'qkv',             # fused QKV projection
+        'linear_qkv',      # Megatron naming
+        'dense',           # attention output (common in many architectures)
+        'o_proj',          # output projection (alternative naming)
+        'out_proj',        # output projection
+        'linear_proj',     # Megatron attention output
+        'attention.linear_proj',  # More specific Megatron pattern
     ]
     name_lower = name.lower()
     for pattern in exclude_patterns:

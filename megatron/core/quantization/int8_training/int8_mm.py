@@ -201,7 +201,7 @@ def scaled_int8_mm(
 
 @torch.no_grad()
 def quantize_int8_rowwise(
-    tensor: Tensor, stochastic_rounding: bool = False, eps: float = 1e-12
+    tensor: Tensor, stochastic_rounding: bool = False, eps: float = 1e-8
 ):
     """Quantize a tensor to INT8 with row-wise scaling.
     
@@ -218,7 +218,8 @@ def quantize_int8_rowwise(
     # Absmax symmetric quantization using [-127, 127] range
     # This ensures symmetric quantization: -max_val maps to -127, +max_val maps to +127
     scale = tensor.abs().amax(1) / 127  # same dtype as tensor
-    inv_scale = 1.0 / scale.float().clip(eps)
+    # Increased eps from 1e-12 to 1e-8 for better numerical stability
+    inv_scale = 1.0 / scale.float().clip(min=eps)
     tensor = tensor.float() * inv_scale.view(-1, 1)
 
     if stochastic_rounding:

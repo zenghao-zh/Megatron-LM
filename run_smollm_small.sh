@@ -31,10 +31,10 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 2048
     --max-position-embeddings 2048
-    --num-layers 32
-    --hidden-size 960
+    --num-layers 16
+    --hidden-size 480
     --num-attention-heads 15
-    --ffn-hidden-size 2560
+    --ffn-hidden-size 1280
     --init-method-std 0.006
     --attention-dropout 0.0
     --hidden-dropout 0.0

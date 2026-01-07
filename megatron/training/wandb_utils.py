@@ -31,6 +31,8 @@ def on_save_checkpoint_success(checkpoint_path: str, tracker_filename: str, save
     if wandb_writer:
         metadata = {"iteration": iteration}
         artifact_name, artifact_version = _get_artifact_name_and_version(Path(save_dir), Path(checkpoint_path))
+        # WandB artifact names can only contain alphanumeric, dashes, underscores, and dots
+        artifact_name = artifact_name.replace('+', '-')
         artifact = wandb_writer.Artifact(artifact_name, type="model", metadata=metadata)
         # wandb's artifact.add_reference requires absolute paths
         checkpoint_path = str(Path(checkpoint_path).resolve())
@@ -55,6 +57,8 @@ def on_load_checkpoint_success(checkpoint_path: str, load_dir: str) -> None:
     if wandb_writer:
         try:
             artifact_name, artifact_version = _get_artifact_name_and_version(Path(load_dir), Path(checkpoint_path))
+            # WandB artifact names can only contain alphanumeric, dashes, underscores, and dots
+            artifact_name = artifact_name.replace('+', '-')
             wandb_tracker_filename = _get_wandb_artifact_tracker_filename(load_dir)
             artifact_path = ""
             if wandb_tracker_filename.is_file():

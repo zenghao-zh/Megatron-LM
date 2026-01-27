@@ -440,7 +440,7 @@ def scaled_int8_mm_groupwise(
 
 @torch.no_grad()
 def quantize_int8_rowwise(
-    tensor: Tensor, stochastic_rounding: bool = False, eps: float = 1e-8
+    tensor: Tensor, stochastic_rounding: bool = False, eps: float = 1e-12
 ):
     """Quantize a tensor to INT8 with row-wise scaling.
     
@@ -474,7 +474,7 @@ def quantize_int8_rowwise(
 
 @torch.no_grad()
 def quantize_int8_groupwise(
-    tensor: Tensor, group_size: int = 64, stochastic_rounding: bool = False, eps: float = 1e-8
+    tensor: Tensor, group_size: int = 64, stochastic_rounding: bool = False, eps: float = 1e-12
 ):
     """Quantize a tensor to INT8 with group-wise scaling along K dimension.
     

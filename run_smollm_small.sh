@@ -1,6 +1,6 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
@@ -119,8 +119,8 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 5000
-    --eval-interval 5000
+    --save-interval 1000
+    --eval-interval 1000
     --eval-iters 1
     --save $CHECKPOINT_PATH
     # --load $CHECKPOINT_PATH
@@ -136,7 +136,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 
 # TENSORBOARD_ARGS="--tensorboard-dir experiments/tensorboard"
-torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \

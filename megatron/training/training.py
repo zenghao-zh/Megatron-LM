@@ -1349,6 +1349,28 @@ def setup_model_and_optimizer(
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
 
+    # Update INT8 backward config if resumed past the enable threshold
+    if getattr(args, 'int8_mixed_precision_training', False):
+        enable_backward_at_iter = getattr(args, 'int8_mp_enable_backward_at_iter', None)
+        if enable_backward_at_iter is not None and args.iteration >= enable_backward_at_iter:
+            from megatron.core.quantization.int8_training import update_int8_backward_config
+            print_rank_0(f'\n{"="*80}')
+            print_rank_0(f'Resumed at iteration {args.iteration} (>= {enable_backward_at_iter})')
+            print_rank_0(f'Enabling INT8 backward immediately...')
+            print_rank_0(f'{"="*80}')
+            
+            grad_input = getattr(args, 'int8_mp_grad_input', True)
+            grad_weight = getattr(args, 'int8_mp_grad_weight', False)
+            
+            for model_module in model:
+                if hasattr(model_module, 'module'):
+                    update_int8_backward_config(model_module.module, grad_input, grad_weight, verbose=False)
+                else:
+                    update_int8_backward_config(model_module, grad_input, grad_weight, verbose=False)
+            
+            print_rank_0(f'  INT8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
+            print_rank_0(f'{"="*80}\n')
+
     # get model without FP16 and/or DDP wrappers
     if (
         args.iteration == 0
@@ -2492,6 +2514,32 @@ def train(
 
         # Run training step.
         args.curr_iteration = iteration
+        
+        # Check if we need to enable INT8 backward at this iteration
+        enable_backward_at_iter = getattr(args, 'int8_mp_enable_backward_at_iter', None)
+        if (enable_backward_at_iter is not None and 
+            iteration == enable_backward_at_iter and
+            getattr(args, 'int8_mixed_precision_training', False)):
+            from megatron.core.quantization.int8_training import update_int8_backward_config
+            print_rank_0(f'\n{"="*80}')
+            print_rank_0(f'Enabling INT8 backward at iteration {iteration}')
+            print_rank_0(f'{"="*80}')
+            
+            # Get the target backward config from args
+            grad_input = getattr(args, 'int8_mp_grad_input', True)
+            grad_weight = getattr(args, 'int8_mp_grad_weight', False)
+            
+            # Update all models
+            for model_module in model:
+                # Get the underlying module if wrapped in Float16Module
+                if hasattr(model_module, 'module'):
+                    update_int8_backward_config(model_module.module, grad_input, grad_weight, verbose=False)
+                else:
+                    update_int8_backward_config(model_module, grad_input, grad_weight, verbose=False)
+            
+            print_rank_0(f'  INT8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
+            print_rank_0(f'{"="*80}\n')
+        
         ft_integration.on_training_step_start()
         (
             loss_dict,

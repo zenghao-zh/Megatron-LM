@@ -1,11 +1,11 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m-int8-fw-mlp
+EXPERIMENT_NAME=smollm-360m-int8-fw-mlp-4gpu
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -84,8 +84,9 @@ TRAINING_ARGS=(
     # --act-sparse-swiglu-without-silu
     --int8-mixed-precision-training
     # --int8-mp-verbose  # 打印每个层的INT8状态
-    --int8-mp-group-size 16
+    --int8-mp-group-size 64
     # --no-int8-mp-grad-input
+    # --int8-mp-enable-backward-at-iter 2000  # 在2000步时启用INT8 backward
 )
 
 MOE_ARGS=(
@@ -120,7 +121,7 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 5000
+    --save-interval 1000
     --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
@@ -137,7 +138,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 
 # TENSORBOARD_ARGS="--tensorboard-dir experiments/tensorboard"
-torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \

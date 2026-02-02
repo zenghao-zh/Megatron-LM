@@ -43,6 +43,10 @@ from megatron.core.quantization.int8_training.int8_tensor import (
     _dynamic_int8_mm,
     _dynamic_int8_mm_groupwise,
 )
+from megatron.core.quantization.int8_training.int8_mm import (
+    quantize_int8_two_stage_groupwise,
+    scaled_int8_mm_two_stage,
+)
 
 
 
@@ -426,7 +430,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
         # Forward: output = input @ weight.T + bias
         # TE Linear stores weight as [out_features, in_features]
         if config.output:
-            out = _dynamic_int8_mm(input, weight.T, group_size)
+            out = _dynamic_int8_mm(input, weight.T, group_size, config)
         else:
             out = input @ weight.T
         
@@ -442,6 +446,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output, grad_bias_output):
+        from .int8_tensor import _dynamic_int8_mm
         
         layer_name = ctx.layer_name if hasattr(ctx, 'layer_name') else 'unknown'
         
@@ -474,7 +479,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
             # elif config.grad_input
             if config.grad_input:
                 # 不需要画图，直接计算 INT8 结果
-                grad_input = _dynamic_int8_mm(grad_output, weight, group_size)
+                grad_input = _dynamic_int8_mm(grad_output, weight, group_size, config)
             else:
                 # 不使用 INT8
                 grad_input = grad_output @ weight
@@ -486,7 +491,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
             grad_output_2d = grad_output.reshape(-1, weight.shape[0])
             input_2d = input.reshape(-1, weight.shape[1])
             if config.grad_weight:
-                grad_weight = _dynamic_int8_mm(grad_output_2d.T, input_2d, group_size)
+                grad_weight = _dynamic_int8_mm(grad_output_2d.T, input_2d, group_size, config)
             else:
                 grad_weight = grad_output_2d.T @ input_2d
         
@@ -693,6 +698,10 @@ def apply_int8_training_from_args(model, args):
     # Get current iteration (important for resume training)
     current_iteration = getattr(args, 'iteration', 0)
     
+    # Determine quantization method based on --int8-mp-two-stage flag
+    quantization_method = 'two_stage' if getattr(args, 'int8_mp_two_stage', False) else 'groupwise'
+    topk_elements = getattr(args, 'int8_mp_topk', 16)
+    
     if enable_backward_at_iter is not None and current_iteration < enable_backward_at_iter:
         # Start with only forward INT8, backward will be enabled later
         config = Int8MixedPrecisionTrainingConfig(
@@ -700,6 +709,8 @@ def apply_int8_training_from_args(model, args):
             grad_input=False,  # Disable initially
             grad_weight=False,  # Disable initially
             group_size=getattr(args, 'int8_mp_group_size', 64),
+            quantization_method=quantization_method,
+            topk_elements=topk_elements,
         )
         print_rank_0(f'  INT8 backward will be enabled at iteration {enable_backward_at_iter}')
     elif enable_backward_at_iter is not None and current_iteration >= enable_backward_at_iter:
@@ -709,6 +720,8 @@ def apply_int8_training_from_args(model, args):
             grad_input=getattr(args, 'int8_mp_grad_input', True),
             grad_weight=getattr(args, 'int8_mp_grad_weight', False),
             group_size=getattr(args, 'int8_mp_group_size', 64),
+            quantization_method=quantization_method,
+            topk_elements=topk_elements,
         )
         print_rank_0(f'  INT8 backward already enabled (resumed at iteration {current_iteration} >= {enable_backward_at_iter})')
     else:
@@ -718,7 +731,15 @@ def apply_int8_training_from_args(model, args):
             grad_input=getattr(args, 'int8_mp_grad_input', True),
             grad_weight=getattr(args, 'int8_mp_grad_weight', False),
             group_size=getattr(args, 'int8_mp_group_size', 64),
+            quantization_method=quantization_method,
+            topk_elements=topk_elements,
         )
+    
+    # Print quantization method info
+    if quantization_method == 'two_stage':
+        print_rank_0(f'  Using two-stage quantization: top-{topk_elements} outliers per group')
+    else:
+        print_rank_0(f'  Using standard group-wise quantization')
     
     # Use default filter to exclude lm_head unless user explicitly wants all layers
     filter_fn = None

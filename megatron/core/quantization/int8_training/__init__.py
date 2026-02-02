@@ -50,280 +50,367 @@ from megatron.core.quantization.int8_training.int8_mm import (
 
 
 
-# from .int8_tensor import _dynamic_int8_mm
-# import torch.distributed as dist
-# import matplotlib
-# matplotlib.use('Agg')  # 无界面后端
-# import matplotlib.pyplot as plt
-# import numpy as np
-# import os
-# import re
+from .int8_tensor import _dynamic_int8_mm
+import torch.distributed as dist
+import matplotlib
+matplotlib.use('Agg')  # 无界面后端
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import re
 
 
-# def _should_plot_analysis(layer_name, config):
-#     """判断是否需要进行可视化分析，返回 (should_plot, layer_id, iteration)
+def _should_plot_analysis(layer_name, config):
+    """判断是否需要进行可视化分析，返回 (should_plot, layer_id, iteration)
     
-#     注意：画图功能独立于 config.grad_input 设置
-#     - 画图时总是计算 INT8 和 FP32 的对比，用于分析量化效果
-#     - 但是否真正使用 INT8 结果取决于 config.grad_input
-#     """
-#     import re
-#     import torch.distributed as dist
+    注意：画图功能独立于 config.grad_input 设置
+    - 画图时总是计算 INT8 和 FP32 的对比，用于分析量化效果
+    - 但是否真正使用 INT8 结果取决于 config.grad_input
+    """
+    import re
+    import torch.distributed as dist
     
-#     # 只在 rank 0 画图
-#     try:
-#         if dist.is_initialized():
-#             rank = dist.get_rank()
-#             if rank != 0:
-#                 return False, -1, 0
-#     except:
-#         pass  # 非分布式环境
+    # 只在 rank 0 画图
+    try:
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            if rank != 0:
+                return False, -1, 0
+    except:
+        pass  # 非分布式环境
     
-#     # 提取层号
-#     match = re.search(r'layers\.(\d+)\.', layer_name)
-#     if not match:
-#         return False, -1, 0
+    # 提取层号
+    match = re.search(r'layers\.(\d+)\.', layer_name)
+    if not match:
+        return False, -1, 0
     
-#     layer_id = int(match.group(1))
-#     if layer_id not in [0, 10, 20, 31]:
-#         return False, layer_id, 0
+    layer_id = int(match.group(1))
+    if layer_id not in [0, 10, 20, 31]:
+        return False, layer_id, 0
     
-#     # 获取当前迭代次数
-#     try:
-#         from megatron.training import get_args
-#         args = get_args()
-#         iteration = args.iteration if hasattr(args, 'iteration') else 0
-#     except:
-#         iteration = 0
+    # 获取当前迭代次数
+    try:
+        from megatron.training import get_args
+        args = get_args()
+        iteration = args.iteration if hasattr(args, 'iteration') else 0
+    except:
+        iteration = 0
     
-#     # 配置：指定需要画图的 iterations（可以是列表或每N步）
-#     # 选项1：只在特定 iterations 画图
-#     target_iterations = [8000, 8010]  # 指定需要画图的迭代次数
-#     should_plot = iteration in target_iterations
+    # 配置：指定需要画图的 iterations（可以是列表或每N步）
+    # 选项1：只在特定 iterations 画图
+    target_iterations = [6000, 6010]  # 指定需要画图的迭代次数
+    should_plot = iteration in target_iterations
     
-#     # 选项2：每 N 步画一次（注释掉选项1，启用这一行）
-#     # should_plot = (iteration % 100 == 0)
+    # 选项2：每 N 步画一次（注释掉选项1，启用这一行）
+    # should_plot = (iteration % 100 == 0)
     
-#     # 选项3：调试模式 - 每次都画图（训练时记得关闭！性能影响很大）
-#     # should_plot = True
+    # 选项3：调试模式 - 每次都画图（训练时记得关闭！性能影响很大）
+    # should_plot = True
     
-#     return should_plot, layer_id, iteration
+    return should_plot, layer_id, iteration
 
 
-# def _quantize_fp8_e4m3(tensor):
-#     """FP8 E4M3 量化，返回量化值和反量化值"""
-#     import torch
-#     max_fp8 = 448.0
-#     amax = tensor.abs().max()
-#     scale = amax / max_fp8
-#     scale = scale.clamp(min=1e-12)
+def _quantize_fp8_e4m3(tensor):
+    """FP8 E4M3 量化，返回量化值和反量化值"""
+    import torch
+    max_fp8 = 448.0
+    amax = tensor.abs().max()
+    scale = amax / max_fp8
+    scale = scale.clamp(min=1e-20)  # 使用更小的eps以支持小梯度（如1e-14）
     
-#     quantized = tensor / scale
-#     quantized = quantized.clamp(-max_fp8, max_fp8)
-#     quantized_fp8 = torch.round(quantized * 8) / 8
-#     dequantized = quantized_fp8 * scale
+    quantized = tensor / scale
+    quantized = quantized.clamp(-max_fp8, max_fp8)
+    quantized_fp8 = torch.round(quantized * 8) / 8
+    dequantized = quantized_fp8 * scale
     
-#     return quantized_fp8, dequantized, scale
+    return quantized_fp8, dequantized, scale
 
 
-# def _compute_quantization_data(grad_output, weight, group_size):
-#     """计算所有量化数据，返回字典"""
-#     import torch
-#     from .int8_tensor import quantize_int8_rowwise, quantize_int8_groupwise, _dynamic_int8_mm
+def _compute_quantization_data(grad_output, weight, group_size, config=None):
+    """计算所有量化数据，返回字典
     
-#     data = {}
+    Args:
+        grad_output: 梯度输出张量
+        weight: 权重张量
+        group_size: 量化组大小
+        config: INT8训练配置（可选，用于两阶段量化）
+    """
+    import torch
+    from .int8_mm import (
+        quantize_int8_rowwise, 
+        quantize_int8_groupwise, 
+        quantize_int8_two_stage_groupwise
+    )
+    from .int8_tensor import _dynamic_int8_mm
     
-#     # FP32 结果（真实值）
-#     data['grad_input_fp32'] = grad_output @ weight
-#     data['grad_input_int8'] = _dynamic_int8_mm(grad_output, weight, group_size)
+    data = {}
     
-#     # FP8 量化
-#     data['grad_output_fp8_quant'], data['grad_output_fp8_dequant'], data['fp8_gout_scale'] = _quantize_fp8_e4m3(grad_output)
-#     data['weight_fp8_quant'], data['weight_fp8_dequant'], data['fp8_weight_scale'] = _quantize_fp8_e4m3(weight)
-#     data['grad_input_fp8'] = data['grad_output_fp8_dequant'] @ data['weight_fp8_dequant']
+    # FP32 结果（真实值）
+    data['grad_input_fp32'] = grad_output @ weight
     
-#     # INT8 量化
-#     grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
-#     weight_2d = weight.contiguous()
+    # INT8 结果 - 传递config以支持两阶段量化
+    data['grad_input_int8'] = _dynamic_int8_mm(grad_output, weight, group_size, config)
     
-#     if group_size > 0:
-#         grad_output_i8, grad_output_scale = quantize_int8_groupwise(grad_output_2d, group_size)
-#         weight_2d_t = weight_2d.T.contiguous()
-#         weight_i8, weight_scale = quantize_int8_groupwise(weight_2d_t, group_size)
+    # FP8 量化（作为对比）
+    data['grad_output_fp8_quant'], data['grad_output_fp8_dequant'], data['fp8_gout_scale'] = _quantize_fp8_e4m3(grad_output)
+    data['weight_fp8_quant'], data['weight_fp8_dequant'], data['fp8_weight_scale'] = _quantize_fp8_e4m3(weight)
+    data['grad_input_fp8'] = data['grad_output_fp8_dequant'] @ data['weight_fp8_dequant']
+    
+    # INT8 量化详细分析
+    grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
+    weight_2d = weight.contiguous()
+    
+    # 检查是否使用两阶段量化
+    use_two_stage = config is not None and config.quantization_method == 'two_stage'
+    
+    if group_size > 0:
+        if use_two_stage:
+            # 两阶段量化
+            topk_elements = config.topk_elements if config else 16
+            grad_output_i8, grad_output_scales, grad_output_mask = quantize_int8_two_stage_groupwise(
+                grad_output_2d, group_size, topk_elements
+            )
+            weight_2d_t = weight_2d.T.contiguous()
+            weight_i8, weight_scale = quantize_int8_groupwise(weight_2d_t, group_size)
+            
+            # Dequantize grad_output (两阶段)
+            M, K = grad_output_2d.shape
+            num_groups = (K + group_size - 1) // group_size
+            
+            # 展开scales和mask
+            scale_topk = grad_output_scales[:, :, 0].unsqueeze(-1)  # [M, num_groups, 1]
+            scale_others = grad_output_scales[:, :, 1].unsqueeze(-1)  # [M, num_groups, 1]
+            
+            # 根据mask选择scale
+            scales_selected = torch.where(grad_output_mask, scale_topk, scale_others)  # [M, num_groups, group_size]
+            grad_output_i8_grouped = grad_output_i8.reshape(M, -1)[:, :K].reshape(M, num_groups, -1)
+            grad_output_dequant = (grad_output_i8_grouped.float() * scales_selected).reshape(M, -1)[:, :K]
+            data['grad_output_dequant'] = grad_output_dequant.reshape(grad_output.shape)
+            
+            # Dequantize weight (标准groupwise)
+            N, K_w = weight_2d_t.shape
+            weight_scale_expanded = weight_scale.unsqueeze(-1).expand(-1, -1, group_size).reshape(N, -1)[:, :K_w]
+            data['weight_dequant'] = (weight_i8.float() * weight_scale_expanded).T
+            
+            # 保存额外的两阶段信息
+            data['grad_output_scales'] = grad_output_scales
+            data['grad_output_mask'] = grad_output_mask
+            data['topk_count'] = grad_output_mask.sum().item()
+            data['total_count'] = grad_output_mask.numel()
+        else:
+            # 标准groupwise量化
+            grad_output_i8, grad_output_scale = quantize_int8_groupwise(grad_output_2d, group_size)
+            weight_2d_t = weight_2d.T.contiguous()
+            weight_i8, weight_scale = quantize_int8_groupwise(weight_2d_t, group_size)
+            
+            M, K = grad_output_2d.shape
+            grad_output_scale_expanded = grad_output_scale.unsqueeze(-1).expand(-1, -1, group_size).reshape(M, -1)[:, :K]
+            data['grad_output_dequant'] = (grad_output_i8.float() * grad_output_scale_expanded).reshape(grad_output.shape)
+            
+            N, K_w = weight_2d_t.shape
+            weight_scale_expanded = weight_scale.unsqueeze(-1).expand(-1, -1, group_size).reshape(N, -1)[:, :K_w]
+            data['weight_dequant'] = (weight_i8.float() * weight_scale_expanded).T
+    else:
+        # Row-wise量化
+        grad_output_i8, grad_output_scale = quantize_int8_rowwise(grad_output_2d)
+        weight_t_contig = weight_2d.T.contiguous()
+        weight_i8, weight_scale = quantize_int8_rowwise(weight_t_contig)
         
-#         M, K = grad_output_2d.shape
-#         grad_output_scale_expanded = grad_output_scale.unsqueeze(-1).expand(-1, -1, group_size).reshape(M, -1)[:, :K]
-#         data['grad_output_dequant'] = (grad_output_i8.float() * grad_output_scale_expanded).reshape(grad_output.shape)
-        
-#         N, K_w = weight_2d_t.shape
-#         weight_scale_expanded = weight_scale.unsqueeze(-1).expand(-1, -1, group_size).reshape(N, -1)[:, :K_w]
-#         data['weight_dequant'] = (weight_i8.float() * weight_scale_expanded).T
-#     else:
-#         grad_output_i8, grad_output_scale = quantize_int8_rowwise(grad_output_2d)
-#         weight_t_contig = weight_2d.T.contiguous()
-#         weight_t_i8, weight_scale = quantize_int8_rowwise(weight_t_contig)
-        
-#         data['grad_output_dequant'] = (grad_output_i8.float() * grad_output_scale.unsqueeze(1)).reshape(grad_output.shape)
-#         data['weight_dequant'] = (weight_t_i8.float() * weight_scale.unsqueeze(1)).T
+        data['grad_output_dequant'] = (grad_output_i8.float() * grad_output_scale.unsqueeze(1)).reshape(grad_output.shape)
+        data['weight_dequant'] = (weight_i8.float() * weight_scale.unsqueeze(1)).T
     
-#     data['grad_output_i8'] = grad_output_i8
-#     data['weight_i8'] = weight_i8
+    data['grad_output_i8'] = grad_output_i8
+    data['weight_i8'] = weight_i8
+    data['use_two_stage'] = use_two_stage
     
-#     return data
+    return data
 
 
-# def _plot_histogram(ax, data, bins, title, xlabel='Value', ylabel='Frequency', stats_text=None, color='blue', edgecolor='darkblue', **kwargs):
-#     """绘制直方图的通用函数"""
-#     ax.hist(data, bins=bins, edgecolor=edgecolor, alpha=0.8, color=color, **kwargs)
-#     ax.set_xlabel(xlabel, fontsize=10)
-#     ax.set_ylabel(ylabel, fontsize=10)
-#     ax.set_title(title, fontsize=11, fontweight='bold')
-#     ax.grid(True, alpha=0.3)
+def _plot_histogram(ax, data, bins, title, xlabel='Value', ylabel='Frequency', stats_text=None, color='blue', edgecolor='darkblue', **kwargs):
+    """绘制直方图的通用函数"""
+    ax.hist(data, bins=bins, edgecolor=edgecolor, alpha=0.8, color=color, **kwargs)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_title(title, fontsize=11, fontweight='bold')
+    ax.grid(True, alpha=0.3)
     
-#     if stats_text:
-#         ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
-#                 fontsize=8, va='top', ha='right',
-#                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
+    if stats_text:
+        ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+                fontsize=8, va='top', ha='right',
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
 
 
-# def _plot_quantization_analysis(grad_output, weight, data, layer_id, layer_name, iteration):
-#     """创建完整的量化分析图表"""
-#     import matplotlib.pyplot as plt
-#     import numpy as np
-#     import os
+def _safe_log10(arr):
+    """计算log10，使用数据本身的非零最小值作为epsilon
     
-#     # 转换为 numpy
-#     np_data = {k: v.detach().float().cpu().flatten().numpy() for k, v in data.items() if hasattr(v, 'detach')}
+    这样可以避免小梯度被固定的1e-10淹没的问题
+    """
+    abs_arr = np.abs(arr)
+    # 找到非零值中的最小值，作为epsilon
+    nonzero_mask = abs_arr > 0
+    if nonzero_mask.any():
+        min_nonzero = abs_arr[nonzero_mask].min()
+        # 使用最小非零值的1/10作为epsilon，确保零值在log scale上显示在最小值之下
+        eps = min_nonzero * 0.1
+    else:
+        eps = 1e-38  # 如果全是零，使用float32最小正数附近的值
     
-#     # 原始数据
-#     grad_output_bf16 = grad_output.detach().float().cpu().flatten().numpy()
-#     weight_bf16 = weight.detach().float().cpu().flatten().numpy()
-    
-#     # 误差计算
-#     error = np_data['grad_input_int8'] - np_data['grad_input_fp32']
-#     fp8_error = np_data['grad_input_fp8'] - np_data['grad_input_fp32']
-    
-#     # 创建 4x5 子图
-#     fig, axes = plt.subplots(4, 5, figsize=(28, 20))
-#     fig.suptitle(f'Layer {layer_id}: {layer_name} (Iteration {iteration})', fontsize=17, fontweight='bold')
-    
-#     # 第一行：grad_output
-#     _plot_histogram(axes[0, 0], grad_output_bf16, 100, 'grad_output: BF16 Original', 
-#                     stats_text=f'Mean: {grad_output_bf16.mean():.3e}\nStd: {grad_output_bf16.std():.3e}')
-    
-#     grad_output_log = np.log10(np.abs(grad_output_bf16) + 1e-10)
-#     _plot_histogram(axes[0, 1], grad_output_log, 100, 'grad_output: BF16 (log scale)', 
-#                     xlabel='log10(|Value|)', color='royalblue', edgecolor='navy')
-    
-#     _plot_histogram(axes[0, 2], np_data['grad_output_i8'].astype(np.int8), 255, 
-#                     'grad_output: INT8 Quantized [-127, 127]', xlabel='INT8 Value',
-#                     color='red', edgecolor='darkred', range=(-127, 128))
-#     axes[0, 2].set_xlim(-128, 128)
-    
-#     _plot_histogram(axes[0, 3], np_data['grad_output_dequant'], 100, 'grad_output: INT8 Dequant',
-#                     color='violet', edgecolor='darkviolet')
-    
-#     _plot_histogram(axes[0, 4], np_data['grad_output_fp8_dequant'], 100, 'grad_output: FP8 E4M3 Dequant',
-#                     color='gold', edgecolor='darkgoldenrod')
-    
-#     # 第二行：weight
-#     _plot_histogram(axes[1, 0], weight_bf16, 100, 'Weight: BF16 Original',
-#                     color='green', edgecolor='darkgreen')
-    
-#     weight_log = np.log10(np.abs(weight_bf16) + 1e-10)
-#     _plot_histogram(axes[1, 1], weight_log, 100, 'Weight: BF16 (log scale)',
-#                     xlabel='log10(|Value|)', color='limegreen', edgecolor='darkgreen')
-    
-#     _plot_histogram(axes[1, 2], np_data['weight_i8'].astype(np.int8), 255,
-#                     'Weight: INT8 Quantized [-127, 127]', xlabel='INT8 Value',
-#                     color='magenta', edgecolor='darkmagenta', range=(-127, 128))
-#     axes[1, 2].set_xlim(-128, 128)
-    
-#     _plot_histogram(axes[1, 3], np_data['weight_dequant'], 100, 'Weight: INT8 Dequant',
-#                     color='cyan', edgecolor='darkcyan')
-    
-#     _plot_histogram(axes[1, 4], np_data['weight_fp8_dequant'], 100, 'Weight: FP8 E4M3 Dequant',
-#                     color='gold', edgecolor='darkgoldenrod')
-    
-#     # 第三行：grad_input 结果和误差
-#     _plot_histogram(axes[2, 0], np_data['grad_input_fp32'], 100, 'grad_input: BF16 Result',
-#                     color='purple', edgecolor='darkviolet')
-    
-#     ginput_log = np.log10(np.abs(np_data['grad_input_fp32']) + 1e-10)
-#     _plot_histogram(axes[2, 1], ginput_log, 100, 'grad_input: BF16 (log scale)',
-#                     xlabel='log10(|Value|)', color='mediumpurple', edgecolor='indigo')
-    
-#     _plot_histogram(axes[2, 2], np_data['grad_input_int8'], 100, 'grad_input: INT8 Result',
-#                     color='orange', edgecolor='darkorange')
-    
-#     # INT8 误差
-#     int8_mae = np.abs(error).mean()
-#     _plot_histogram(axes[2, 3], error, 100, 'grad_input: INT8 Error',
-#                     xlabel='Error (INT8-BF16)', color='crimson', edgecolor='black',
-#                     stats_text=f'MAE: {int8_mae:.2e}\nMax: {np.abs(error).max():.2e}')
-#     axes[2, 3].axvline(x=0, color='red', linestyle='--', linewidth=2, alpha=0.7)
-    
-#     # FP8 误差
-#     fp8_mae = np.abs(fp8_error).mean()
-#     _plot_histogram(axes[2, 4], fp8_error, 100, 'grad_input: FP8 Error',
-#                     xlabel='Error (FP8-BF16)', color='olive', edgecolor='black',
-#                     stats_text=f'MAE: {fp8_mae:.2e}\nMax: {np.abs(fp8_error).max():.2e}')
-#     axes[2, 4].axvline(x=0, color='red', linestyle='--', linewidth=2, alpha=0.7)
-    
-#     # 第四行：FP8 详细分析和对比表
-#     _plot_histogram(axes[3, 0], np_data['grad_output_fp8_quant'], 100, 'FP8 E4M3: grad_output Quantized',
-#                     xlabel='Quantized Value', color='gold', edgecolor='darkgoldenrod')
-    
-#     fp8_quant_log = np.log10(np.abs(np_data['grad_output_fp8_quant']) + 1e-10)
-#     _plot_histogram(axes[3, 1], fp8_quant_log, 100, 'FP8 E4M3: Quantized (log)',
-#                     xlabel='log10(|Quant Value|)', color='khaki', edgecolor='darkgoldenrod')
-    
-#     _plot_histogram(axes[3, 2], np_data['grad_input_fp8'], 100, 'FP8 E4M3: grad_input Result',
-#                     color='yellowgreen', edgecolor='darkolivegreen')
-    
-#     _plot_histogram(axes[3, 3], np_data['weight_fp8_quant'], 100, 'FP8 E4M3: Weight Quantized',
-#                     xlabel='Quantized Value', color='limegreen', edgecolor='darkgreen')
-    
-#     # 对比表
-#     axes[3, 4].axis('off')
-#     gout_int8_mae = np.abs(grad_output_bf16 - np_data['grad_output_dequant']).mean()
-#     gout_fp8_mae = np.abs(grad_output_bf16 - np_data['grad_output_fp8_dequant']).mean()
-#     weight_int8_mae = np.abs(weight_bf16 - np_data['weight_dequant']).mean()
-#     weight_fp8_mae = np.abs(weight_bf16 - np_data['weight_fp8_dequant']).mean()
-    
-#     comparison = f'''Quantization Comparison
-    
-# grad_input Error:
-#   INT8 MAE: {int8_mae:.2e}
-#   FP8  MAE: {fp8_mae:.2e}
-#   Ratio: {(fp8_mae/int8_mae):.3f}x
+    return np.log10(abs_arr + eps)
 
-# grad_output Dequant MAE:
-#   INT8: {gout_int8_mae:.2e}
-#   FP8:  {gout_fp8_mae:.2e}
 
-# Weight Dequant MAE:
-#   INT8: {weight_int8_mae:.2e}
-#   FP8:  {weight_fp8_mae:.2e}'''
+def _plot_quantization_analysis(grad_output, weight, data, layer_id, layer_name, iteration):
+    """创建完整的量化分析图表"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
     
-#     axes[3, 4].text(0.05, 0.5, comparison, transform=axes[3, 4].transAxes,
-#                     fontsize=8, va='center', ha='left', family='monospace',
-#                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # 转换为 numpy
+    np_data = {k: v.detach().float().cpu().flatten().numpy() for k, v in data.items() if hasattr(v, 'detach')}
     
-#     # 保存
-#     save_dir = '/root/workspace/Megatron-LM/grad_input_int8_analysis'
-#     os.makedirs(save_dir, exist_ok=True)
-#     safe_layer_name = layer_name.replace('.', '_').replace('/', '_')
-#     save_path = os.path.join(save_dir, f'layer{layer_id}_iter{iteration}_{safe_layer_name}.png')
-#     plt.tight_layout(pad=2.0)
-#     plt.savefig(save_path, dpi=120, bbox_inches='tight')
-#     plt.close()
+    # 原始数据
+    grad_output_bf16 = grad_output.detach().float().cpu().flatten().numpy()
+    weight_bf16 = weight.detach().float().cpu().flatten().numpy()
     
-#     print(f"\n{'='*80}")
-#     print(f"[Quantization Analysis] Layer {layer_id} | Iteration {iteration} | {layer_name}")
-#     print(f"INT8 MAE: {int8_mae:.6e} | FP8 MAE: {fp8_mae:.6e} | Ratio: {(fp8_mae/int8_mae):.4f}")
-#     print(f"Saved to: {save_path}")
-#     print(f"{'='*80}\n")
+    # 误差计算
+    error = np_data['grad_input_int8'] - np_data['grad_input_fp32']
+    fp8_error = np_data['grad_input_fp8'] - np_data['grad_input_fp32']
+    
+    # 创建 4x5 子图
+    fig, axes = plt.subplots(4, 5, figsize=(28, 20))
+    fig.suptitle(f'Layer {layer_id}: {layer_name} (Iteration {iteration})', fontsize=17, fontweight='bold')
+    
+    # 第一行：grad_output
+    _plot_histogram(axes[0, 0], grad_output_bf16, 100, 'grad_output: BF16 Original', 
+                    stats_text=f'Mean: {grad_output_bf16.mean():.3e}\nStd: {grad_output_bf16.std():.3e}')
+    
+    grad_output_log = _safe_log10(grad_output_bf16)
+    _plot_histogram(axes[0, 1], grad_output_log, 100, 'grad_output: BF16 (log scale)', 
+                    xlabel='log10(|Value|)', color='royalblue', edgecolor='navy')
+    
+    _plot_histogram(axes[0, 2], np_data['grad_output_i8'].astype(np.int8), 255, 
+                    'grad_output: INT8 Quantized [-127, 127]', xlabel='INT8 Value',
+                    color='red', edgecolor='darkred', range=(-127, 128))
+    axes[0, 2].set_xlim(-128, 128)
+    
+    _plot_histogram(axes[0, 3], np_data['grad_output_dequant'], 100, 'grad_output: INT8 Dequant',
+                    color='violet', edgecolor='darkviolet')
+    
+    _plot_histogram(axes[0, 4], np_data['grad_output_fp8_dequant'], 100, 'grad_output: FP8 E4M3 Dequant',
+                    color='gold', edgecolor='darkgoldenrod')
+    
+    # 第二行：weight
+    _plot_histogram(axes[1, 0], weight_bf16, 100, 'Weight: BF16 Original',
+                    color='green', edgecolor='darkgreen')
+    
+    weight_log = _safe_log10(weight_bf16)
+    _plot_histogram(axes[1, 1], weight_log, 100, 'Weight: BF16 (log scale)',
+                    xlabel='log10(|Value|)', color='limegreen', edgecolor='darkgreen')
+    
+    _plot_histogram(axes[1, 2], np_data['weight_i8'].astype(np.int8), 255,
+                    'Weight: INT8 Quantized [-127, 127]', xlabel='INT8 Value',
+                    color='magenta', edgecolor='darkmagenta', range=(-127, 128))
+    axes[1, 2].set_xlim(-128, 128)
+    
+    _plot_histogram(axes[1, 3], np_data['weight_dequant'], 100, 'Weight: INT8 Dequant',
+                    color='cyan', edgecolor='darkcyan')
+    
+    _plot_histogram(axes[1, 4], np_data['weight_fp8_dequant'], 100, 'Weight: FP8 E4M3 Dequant',
+                    color='gold', edgecolor='darkgoldenrod')
+    
+    # 第三行：grad_input 结果和误差
+    _plot_histogram(axes[2, 0], np_data['grad_input_fp32'], 100, 'grad_input: BF16 Result',
+                    color='purple', edgecolor='darkviolet')
+    
+    ginput_log = _safe_log10(np_data['grad_input_fp32'])
+    _plot_histogram(axes[2, 1], ginput_log, 100, 'grad_input: BF16 (log scale)',
+                    xlabel='log10(|Value|)', color='mediumpurple', edgecolor='indigo')
+    
+    _plot_histogram(axes[2, 2], np_data['grad_input_int8'], 100, 'grad_input: INT8 Result',
+                    color='orange', edgecolor='darkorange')
+    
+    # INT8 误差
+    int8_mae = np.abs(error).mean()
+    _plot_histogram(axes[2, 3], error, 100, 'grad_input: INT8 Error',
+                    xlabel='Error (INT8-BF16)', color='crimson', edgecolor='black',
+                    stats_text=f'MAE: {int8_mae:.2e}\nMax: {np.abs(error).max():.2e}')
+    axes[2, 3].axvline(x=0, color='red', linestyle='--', linewidth=2, alpha=0.7)
+    
+    # FP8 误差
+    fp8_mae = np.abs(fp8_error).mean()
+    _plot_histogram(axes[2, 4], fp8_error, 100, 'grad_input: FP8 Error',
+                    xlabel='Error (FP8-BF16)', color='olive', edgecolor='black',
+                    stats_text=f'MAE: {fp8_mae:.2e}\nMax: {np.abs(fp8_error).max():.2e}')
+    axes[2, 4].axvline(x=0, color='red', linestyle='--', linewidth=2, alpha=0.7)
+    
+    # 第四行：FP8 详细分析和对比表
+    _plot_histogram(axes[3, 0], np_data['grad_output_fp8_quant'], 100, 'FP8 E4M3: grad_output Quantized',
+                    xlabel='Quantized Value', color='gold', edgecolor='darkgoldenrod')
+    
+    fp8_quant_log = _safe_log10(np_data['grad_output_fp8_quant'])
+    _plot_histogram(axes[3, 1], fp8_quant_log, 100, 'FP8 E4M3: Quantized (log)',
+                    xlabel='log10(|Quant Value|)', color='khaki', edgecolor='darkgoldenrod')
+    
+    _plot_histogram(axes[3, 2], np_data['grad_input_fp8'], 100, 'FP8 E4M3: grad_input Result',
+                    color='yellowgreen', edgecolor='darkolivegreen')
+    
+    _plot_histogram(axes[3, 3], np_data['weight_fp8_quant'], 100, 'FP8 E4M3: Weight Quantized',
+                    xlabel='Quantized Value', color='limegreen', edgecolor='darkgreen')
+    
+    # 对比表
+    axes[3, 4].axis('off')
+    gout_int8_mae = np.abs(grad_output_bf16 - np_data['grad_output_dequant']).mean()
+    gout_fp8_mae = np.abs(grad_output_bf16 - np_data['grad_output_fp8_dequant']).mean()
+    weight_int8_mae = np.abs(weight_bf16 - np_data['weight_dequant']).mean()
+    weight_fp8_mae = np.abs(weight_bf16 - np_data['weight_fp8_dequant']).mean()
+    
+    # 检查是否使用两阶段量化
+    use_two_stage = data.get('use_two_stage', False)
+    quant_method = 'Two-Stage' if use_two_stage else 'Groupwise'
+    
+    comparison = f'''Quantization Comparison
+Method: {quant_method}
+
+grad_input Error:
+  INT8 MAE: {int8_mae:.2e}
+  FP8  MAE: {fp8_mae:.2e}
+  Ratio: {(fp8_mae/int8_mae if int8_mae > 0 else 0):.3f}x
+
+grad_output Dequant MAE:
+  INT8: {gout_int8_mae:.2e}
+  FP8:  {gout_fp8_mae:.2e}
+
+Weight Dequant MAE:
+  INT8: {weight_int8_mae:.2e}
+  FP8:  {weight_fp8_mae:.2e}'''
+    
+    # 添加两阶段量化的额外信息
+    if use_two_stage and 'topk_count' in data:
+        topk_ratio = data['topk_count'] / data['total_count'] * 100
+        comparison += f'''
+
+Two-Stage Info:
+  TopK ratio: {topk_ratio:.1f}%'''
+    
+    axes[3, 4].text(0.05, 0.5, comparison, transform=axes[3, 4].transAxes,
+                    fontsize=8, va='center', ha='left', family='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # 保存
+    save_dir = '/root/workspace/Megatron-LM/grad_input_int8_analysis'
+    os.makedirs(save_dir, exist_ok=True)
+    safe_layer_name = layer_name.replace('.', '_').replace('/', '_')
+    suffix = '_two_stage' if use_two_stage else ''
+    save_path = os.path.join(save_dir, f'layer{layer_id}_iter{iteration}_{safe_layer_name}{suffix}.png')
+    plt.tight_layout(pad=2.0)
+    plt.savefig(save_path, dpi=120, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\n{'='*80}")
+    print(f"[Quantization Analysis] Layer {layer_id} | Iteration {iteration} | {layer_name}")
+    print(f"Method: {quant_method}")
+    print(f"INT8 MAE: {int8_mae:.6e} | FP8 MAE: {fp8_mae:.6e} | Ratio: {(fp8_mae/int8_mae if int8_mae > 0 else 0):.4f}")
+    print(f"Saved to: {save_path}")
+    print(f"{'='*80}\n")
 
 
 def _is_te_linear_layer(module):
@@ -465,8 +552,8 @@ class _Int8TELinearFunction(torch.autograd.Function):
             
             # # 如果需要画图，计算并可视化量化前后的结果
             # if should_plot:
-            #     # 计算所有量化数据
-            #     quant_data = _compute_quantization_data(grad_output, weight, group_size)
+            #     # 计算所有量化数据（传递config以支持两阶段量化分析）
+            #     quant_data = _compute_quantization_data(grad_output, weight, group_size, config)
                 
             #     # 绘制分析图
             #     _plot_quantization_analysis(grad_output, weight, quant_data, layer_id, layer_name, iteration)
@@ -476,7 +563,7 @@ class _Int8TELinearFunction(torch.autograd.Function):
             #         grad_input = quant_data['grad_input_int8']
             #     else:
             #         grad_input = grad_output @ weight
-            # elif config.grad_input
+            # elif config.grad_input:
             if config.grad_input:
                 # 不需要画图，直接计算 INT8 结果
                 grad_input = _dynamic_int8_mm(grad_output, weight, group_size, config)

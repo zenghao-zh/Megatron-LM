@@ -2274,6 +2274,12 @@ def _add_mixed_precision_args(parser):
                        help='Quantization group size along K dimension. '
                        '0=row-wise (one scale per row), 64=group-wise (one scale per 64 elements). '
                        'Group-wise is recommended for Tensor Parallelism. (Default: 64)')
+    group.add_argument('--int8-mp-two-stage', action='store_true',
+                       help='Enable two-stage quantization: top-k outliers and remaining elements '
+                       'use separate scales for higher precision. (Default: disabled)')
+    group.add_argument('--int8-mp-topk', type=int, default=16,
+                       help='Number of top-k elements per group for two-stage quantization. '
+                       'Only used when --int8-mp-two-stage is enabled. (Default: 16)')
     group.add_argument('--int8-mp-all-layers', action='store_true',
                        help='Apply INT8 to ALL Linear layers including lm_head/output_layer. '
                        '(Default: exclude lm_head for better convergence)')
@@ -2283,6 +2289,41 @@ def _add_mixed_precision_args(parser):
                        help='Enable INT8 backward (grad_input and grad_weight) at specified iteration. '
                        'Before this iteration, only forward (output) uses INT8. '
                        'If not set, backward INT8 follows --no-int8-mp-grad-input and --int8-mp-grad-weight from start.')
+
+    # FP8 mixed-precision training arguments
+    group.add_argument('--fp8-mixed-precision-training', action='store_true',
+                       help='Enable FP8 mixed-precision training. Uses FP8 Tensor Cores '
+                       'for faster matmul while keeping weights in original precision. '
+                       'FP8 has two formats: E4M3 (higher precision) and E5M2 (larger range).')
+    group.add_argument('--no-fp8-mp-output', action='store_false', dest='fp8_mp_output',
+                       default=True,
+                       help='Disable FP8 for forward matmul. (Default: enabled)')
+    group.add_argument('--no-fp8-mp-grad-input', action='store_false', dest='fp8_mp_grad_input',
+                       default=True,
+                       help='Disable FP8 for backward grad_input matmul. (Default: enabled)')
+    group.add_argument('--fp8-mp-grad-weight', action='store_true',
+                       help='Enable FP8 for backward grad_weight matmul. (Default: disabled for better convergence)')
+    group.add_argument('--fp8-mp-group-size', type=int, default=64,
+                       help='Quantization group size along K dimension. '
+                       '0=row-wise (one scale per row), 64=group-wise (one scale per 64 elements). '
+                       'Group-wise is recommended for Tensor Parallelism. (Default: 64)')
+    group.add_argument('--fp8-mp-forward-dtype', type=str, default='e4m3',
+                       choices=['e4m3', 'e5m2'],
+                       help='FP8 dtype for forward pass. e4m3 has higher precision (range [-448,448]), '
+                       'e5m2 has larger range ([-57344,57344]). (Default: e4m3)')
+    group.add_argument('--fp8-mp-backward-dtype', type=str, default='e5m2',
+                       choices=['e4m3', 'e5m2'],
+                       help='FP8 dtype for backward pass. e5m2 recommended for gradients due to larger range. '
+                       '(Default: e5m2)')
+    group.add_argument('--fp8-mp-all-layers', action='store_true',
+                       help='Apply FP8 to ALL Linear layers including lm_head/output_layer. '
+                       '(Default: exclude lm_head for better convergence)')
+    group.add_argument('--fp8-mp-verbose', action='store_true',
+                       help='Print detailed information about which layers have FP8 enabled/disabled.')
+    group.add_argument('--fp8-mp-enable-backward-at-iter', type=int, default=None,
+                       help='Enable FP8 backward (grad_input and grad_weight) at specified iteration. '
+                       'Before this iteration, only forward (output) uses FP8. '
+                       'If not set, backward FP8 follows --no-fp8-mp-grad-input and --fp8-mp-grad-weight from start.')
 
     return parser
 

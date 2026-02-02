@@ -1111,6 +1111,25 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if not getattr(args, 'int8_mp_all_layers', False):
             print_rank_0('  Note: lm_head/output_layer excluded from INT8 for better convergence')
 
+    # FP8 mixed-precision training
+    if getattr(args, 'fp8_mixed_precision_training', False):
+        from megatron.core.quantization.fp8_training import apply_fp8_training_from_args
+        print_rank_0('> Applying FP8 mixed-precision training...')
+        for model_module in model:
+            # Get the underlying module if wrapped in Float16Module
+            if hasattr(model_module, 'module'):
+                apply_fp8_training_from_args(model_module.module, args)
+            else:
+                apply_fp8_training_from_args(model_module, args)
+        print_rank_0(f'  FP8 config: output={args.fp8_mp_output}, '
+                     f'grad_input={args.fp8_mp_grad_input}, '
+                     f'grad_weight={args.fp8_mp_grad_weight}, '
+                     f'group_size={args.fp8_mp_group_size}')
+        print_rank_0(f'  FP8 dtypes: forward={args.fp8_mp_forward_dtype}, '
+                     f'backward={args.fp8_mp_backward_dtype}')
+        if not getattr(args, 'fp8_mp_all_layers', False):
+            print_rank_0('  Note: lm_head/output_layer excluded from FP8 for better convergence')
+
     if wrap_with_ddp:
         if args.use_torch_fsdp2:
             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
@@ -1369,6 +1388,28 @@ def setup_model_and_optimizer(
                     update_int8_backward_config(model_module, grad_input, grad_weight, verbose=False)
             
             print_rank_0(f'  INT8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
+            print_rank_0(f'{"="*80}\n')
+
+    # Update FP8 backward config if resumed past the enable threshold
+    if getattr(args, 'fp8_mixed_precision_training', False):
+        enable_backward_at_iter = getattr(args, 'fp8_mp_enable_backward_at_iter', None)
+        if enable_backward_at_iter is not None and args.iteration >= enable_backward_at_iter:
+            from megatron.core.quantization.fp8_training import update_fp8_backward_config
+            print_rank_0(f'\n{"="*80}')
+            print_rank_0(f'Resumed at iteration {args.iteration} (>= {enable_backward_at_iter})')
+            print_rank_0(f'Enabling FP8 backward immediately...')
+            print_rank_0(f'{"="*80}')
+            
+            grad_input = getattr(args, 'fp8_mp_grad_input', True)
+            grad_weight = getattr(args, 'fp8_mp_grad_weight', False)
+            
+            for model_module in model:
+                if hasattr(model_module, 'module'):
+                    update_fp8_backward_config(model_module.module, grad_input, grad_weight, verbose=False)
+                else:
+                    update_fp8_backward_config(model_module, grad_input, grad_weight, verbose=False)
+            
+            print_rank_0(f'  FP8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
             print_rank_0(f'{"="*80}\n')
 
     # get model without FP16 and/or DDP wrappers
@@ -2538,6 +2579,31 @@ def train(
                     update_int8_backward_config(model_module, grad_input, grad_weight, verbose=False)
             
             print_rank_0(f'  INT8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
+            print_rank_0(f'{"="*80}\n')
+        
+        # Check if we need to enable FP8 backward at this iteration
+        enable_backward_at_iter = getattr(args, 'fp8_mp_enable_backward_at_iter', None)
+        if (enable_backward_at_iter is not None and 
+            iteration == enable_backward_at_iter and
+            getattr(args, 'fp8_mixed_precision_training', False)):
+            from megatron.core.quantization.fp8_training import update_fp8_backward_config
+            print_rank_0(f'\n{"="*80}')
+            print_rank_0(f'Enabling FP8 backward at iteration {iteration}')
+            print_rank_0(f'{"="*80}')
+            
+            # Get the target backward config from args
+            grad_input = getattr(args, 'fp8_mp_grad_input', True)
+            grad_weight = getattr(args, 'fp8_mp_grad_weight', False)
+            
+            # Update all models
+            for model_module in model:
+                # Get the underlying module if wrapped in Float16Module
+                if hasattr(model_module, 'module'):
+                    update_fp8_backward_config(model_module.module, grad_input, grad_weight, verbose=False)
+                else:
+                    update_fp8_backward_config(model_module, grad_input, grad_weight, verbose=False)
+            
+            print_rank_0(f'  FP8 backward enabled: grad_input={grad_input}, grad_weight={grad_weight}')
             print_rank_0(f'{"="*80}\n')
         
         ft_integration.on_training_step_start()

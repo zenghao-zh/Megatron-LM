@@ -34,11 +34,19 @@ class Int8MixedPrecisionTrainingConfig:
             - 0: Row-wise quantization (one scale per row)
             - 64: Group-wise quantization (one scale per 64 elements)
             Group-wise is recommended for Tensor Parallelism compatibility.
+        quantization_method: Quantization method (default: 'groupwise')
+            - 'groupwise': Single-stage group-wise quantization (one scale per group)
+            - 'two_stage': Two-stage quantization (separate scales for top-k outliers and others)
+        topk_elements: Number of top-k elements per group for two-stage quantization (default: 16)
+            Only used when quantization_method='two_stage'.
+            For group_size=64, topk_elements=16 means top 25% outliers get their own scale.
     """
     output: bool = True
     grad_input: bool = True
     grad_weight: bool = False  # Default False for better convergence
     group_size: int = 64  # Default 64 for TP compatibility
+    quantization_method: str = 'groupwise'  # 'groupwise' or 'two_stage'
+    topk_elements: int = 16  # Number of top-k elements for two-stage quantization
     
     def __repr__(self):
         return (
@@ -46,6 +54,8 @@ class Int8MixedPrecisionTrainingConfig:
             f"output={self.output}, "
             f"grad_input={self.grad_input}, "
             f"grad_weight={self.grad_weight}, "
-            f"group_size={self.group_size})"
+            f"group_size={self.group_size}, "
+            f"quantization_method={self.quantization_method}, "
+            f"topk_elements={self.topk_elements})"
         )
 

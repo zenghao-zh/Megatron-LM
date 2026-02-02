@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 #
 # Adapted from TorchAO: https://github.com/pytorch/ao
-# Modified for Megatron-LM integration.
+# Modified for Megatron-LM integration with FP8 support.
 
 """
-INT8 mixed-precision training tensor subclass and autograd function.
+FP8 mixed-precision training tensor subclass and autograd function.
 
 This module provides the core tensor wrapper and autograd function that enables
-INT8 computation in forward and backward passes while keeping weights in original precision.
+FP8 computation in forward and backward passes while keeping weights in original precision.
 """
 
 import functools
@@ -21,14 +21,11 @@ import torch
 import torch.utils._pytree as pytree
 from torch import Tensor, nn
 
-from .config import Int8MixedPrecisionTrainingConfig
-from .int8_mm import (
-    quantize_int8_rowwise, 
-    quantize_int8_groupwise,
-    quantize_int8_two_stage_groupwise,
-    scaled_int8_mm,
-    scaled_int8_mm_groupwise,
-    scaled_int8_mm_two_stage,
+from .config import FP8MixedPrecisionTrainingConfig
+from .fp8_mm import (
+    quantize_fp8_rowwise, 
+    quantize_fp8_groupwise,
+    scaled_fp8_mm_groupwise,
 )
 
 
@@ -51,12 +48,12 @@ def _implements(cls, aten_ops_or_torch_fns):
     return decorator
 
 
-class Int8MixedPrecisionTrainingLinearWeight(Tensor):
-    """Linear weight wrapper for INT8 mixed-precision training.
+class FP8MixedPrecisionTrainingLinearWeight(Tensor):
+    """Linear weight wrapper for FP8 mixed-precision training.
     
     The weight is stored in original precision (e.g. FP32 or BF16).
-    During training, weight and activation are dynamically quantized to INT8 
-    to utilize INT8 Tensor Cores, then scaled back to original precision.
+    During training, weight and activation are dynamically quantized to FP8 
+    to utilize FP8 Tensor Cores, then scaled back to original precision.
     This is applied to both forward and backward passes based on config.
     """
     
@@ -65,7 +62,7 @@ class Int8MixedPrecisionTrainingLinearWeight(Tensor):
 
     @staticmethod
     @torch._dynamo.disable
-    def __new__(cls, data: Tensor, config: Int8MixedPrecisionTrainingConfig):
+    def __new__(cls, data: Tensor, config: FP8MixedPrecisionTrainingConfig):
         return Tensor._make_wrapper_subclass(
             cls,
             data.shape,
@@ -76,7 +73,7 @@ class Int8MixedPrecisionTrainingLinearWeight(Tensor):
         )
 
     @torch._dynamo.disable
-    def __init__(self, data: Tensor, config: Int8MixedPrecisionTrainingConfig):
+    def __init__(self, data: Tensor, config: FP8MixedPrecisionTrainingConfig):
         self._data = data
         self.config = config
 
@@ -152,12 +149,11 @@ class Int8MixedPrecisionTrainingLinearWeight(Tensor):
             return cls._OP_TABLE[func](func, types, args, kwargs)
         
         # Check if this is an external library op (e.g., TransformerEngine, triton)
-        # by looking at the function's module path
         func_module = getattr(func, '__module__', '') or ''
         is_external_op = (
             'transformer_engine' in func_module or 
             'triton' in func_module or
-            'tex.' in str(func) or  # TransformerEngine ops
+            'tex.' in str(func) or
             (hasattr(func, '__self__') and 'transformer_engine' in str(type(func.__self__)))
         )
         
@@ -175,7 +171,6 @@ class Int8MixedPrecisionTrainingLinearWeight(Tensor):
                 return func(*unwrapped_args, **unwrapped_kwargs)
         
         # Let torch dispatch handle standard tensor ops properly
-        # This includes detach, clone, etc. which need to preserve the subclass
         with torch._C.DisableTorchFunctionSubclass():
             return func(*args, **kwargs)
 
@@ -204,161 +199,132 @@ class Int8MixedPrecisionTrainingLinearWeight(Tensor):
         (data,) = all_gather_outputs
         (config,) = metadata
         if out is not None:
-            assert isinstance(out, Int8MixedPrecisionTrainingLinearWeight)
+            assert isinstance(out, FP8MixedPrecisionTrainingLinearWeight)
             assert out.config == config
             return
-        return Int8MixedPrecisionTrainingLinearWeight(data, config), all_gather_outputs
+        return FP8MixedPrecisionTrainingLinearWeight(data, config), all_gather_outputs
 
 
-_INT8_MM_CALL_COUNT = 0
-_INT8_MM_DEBUG = False  # Set to True to verify INT8 is being called
+_FP8_MM_CALL_COUNT = 0
+_FP8_MM_DEBUG = False  # Set to True to verify FP8 is being called
 
 
-def _dynamic_int8_mm(A: Tensor, B: Tensor, group_size: int = 0, config: Int8MixedPrecisionTrainingConfig = None) -> Tensor:
-    """Dynamically quantize A and B to INT8 for matmul, then scale back.
+def _dynamic_fp8_mm(A: Tensor, B: Tensor, group_size: int = 64, config: FP8MixedPrecisionTrainingConfig = None, is_backward: bool = False) -> Tensor:
+    """Dynamically quantize A and B to FP8 for matmul, then scale back.
     
-    Supports row-wise, group-wise, and two-stage quantization.
+    Uses "simulated FP8" - quantizes to FP8 range but stores as BF16 for
+    compatibility with GPUs that don't support native FP8.
+    
+    Supports row-wise and group-wise quantization.
     
     Args:
         A: Activation tensor, may have more than 2 dims
         B: Weight tensor, must be exactly 2-dim
         group_size: Quantization granularity. 0=row-wise, >0=group-wise
-        config: INT8 training config (optional, for two-stage quantization)
+        config: FP8 training config
+        is_backward: If True, use backward format (e5m2), else use forward format (e4m3)
         
     Returns:
         Result tensor in original precision
     """
-    global _INT8_MM_CALL_COUNT
-    _INT8_MM_CALL_COUNT += 1
-    if _INT8_MM_DEBUG and _INT8_MM_CALL_COUNT <= 10:
-        print(f"[INT8] _dynamic_int8_mm called #{_INT8_MM_CALL_COUNT}: "
+    global _FP8_MM_CALL_COUNT
+    _FP8_MM_CALL_COUNT += 1
+    if _FP8_MM_DEBUG and _FP8_MM_CALL_COUNT <= 10:
+        print(f"[FP8] _dynamic_fp8_mm called #{_FP8_MM_CALL_COUNT}: "
               f"A.shape={tuple(A.shape)}, B.shape={tuple(B.shape)}, group_size={group_size}")
+    
+    # Determine FP8 format based on forward/backward
+    if config is not None:
+        fp8_format = config.backward_dtype if is_backward else config.forward_dtype
+    else:
+        # Default: e4m3 for forward, e5m2 for backward
+        fp8_format = 'e5m2' if is_backward else 'e4m3'
     
     # A may have more than 2 dims, while B must be exactly 2-dim
     A_2d = A.reshape(-1, A.shape[-1])
     
     if group_size > 0:
-        # Group-wise or two-stage quantization
-        return _dynamic_int8_mm_groupwise(A, B, group_size, config)
+        # Group-wise quantization
+        return _dynamic_fp8_mm_groupwise(A, B, group_size, fp8_format)
     
-    # Row-wise quantization (original implementation)
+    # Row-wise quantization
     # Quantize A row-wise
-    A_i8, A_scale_rowwise = quantize_int8_rowwise(A_2d.contiguous())
+    A_quant, A_scale_rowwise = quantize_fp8_rowwise(A_2d.contiguous(), fp8_format)
     
     # Quantize B column-wise (via B.T row-wise)
-    # B.T.contiguous() ensures the transposed view is made contiguous BEFORE quantization
     B_t_contig = B.T.contiguous()
-    B_t_i8, B_scale_colwise = quantize_int8_rowwise(B_t_contig)
+    B_t_quant, B_scale_colwise = quantize_fp8_rowwise(B_t_contig, fp8_format)
     
-    # B_t_i8 is [N, K], we need [K, N] for matmul A @ B
-    # B_t_i8.T would be non-contiguous, so we use .T.contiguous()
-    B_i8 = B_t_i8.T.contiguous()
+    # B_t_quant is [N, K], we need [K, N] for matmul A @ B
+    B_quant = B_t_quant.T.contiguous()
     
-    out = scaled_int8_mm(
-        A_i8.contiguous(),
-        B_i8,
-        A_scale_rowwise.contiguous(),
-        B_scale_colwise.contiguous(),
-    )
-    return out.view(*A.shape[:-1], out.shape[-1])
+    # Dequantize and compute: out = (A_quant * A_scale) @ (B_quant * B_scale)
+    A_dequant = A_quant.float() * A_scale_rowwise.unsqueeze(1)
+    B_dequant = B_quant.float() * B_scale_colwise.unsqueeze(0)
+    
+    out = A_dequant @ B_dequant
+    return out.view(*A.shape[:-1], out.shape[-1]).to(A.dtype)
 
 
-def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, config: Int8MixedPrecisionTrainingConfig = None) -> Tensor:
-    """Dynamically quantize A and B to INT8 with group-wise or two-stage scaling.
+def _dynamic_fp8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, fp8_format: str = 'e4m3') -> Tensor:
+    """Dynamically quantize A and B to FP8 with group-wise scaling.
     
-    Each group of `group_size` elements along K dimension has its own scale(s).
-    If config.quantization_method == 'two_stage', uses two-stage quantization.
+    Uses "simulated FP8" - quantizes to FP8 range but stores as BF16.
+    Each group of `group_size` elements along K dimension has its own scale.
     
     Args:
         A: Activation tensor [..., K]
         B: Weight tensor [K, N]
         group_size: Number of elements per quantization group
-        config: INT8 training config (for two-stage quantization)
+        fp8_format: 'e4m3' or 'e5m2'
         
     Returns:
         Result tensor in original precision
     """
     # A may have more than 2 dims
     orig_shape = A.shape
+    orig_dtype = A.dtype
     A_2d = A.reshape(-1, A.shape[-1])  # [M, K]
-    K = A_2d.shape[-1]
     
-    # Check if we should use two-stage quantization
-    use_two_stage = config is not None and config.quantization_method == 'two_stage'
+    # Group-wise quantization (returns BF16 tensors with FP8-range values)
+    # Quantize A with group-wise scaling along K
+    A_quant, A_scales = quantize_fp8_groupwise(A_2d.contiguous(), group_size, fp8_format)
+    # A_quant: [M, K], A_scales: [M, num_groups]
     
-    if use_two_stage:
-        # Two-stage quantization for A (activation), standard groupwise for B (weight)
-        topk_elements = config.topk_elements if config else 16
-        
-        # Quantize A with two-stage scaling
-        A_i8, A_scales, A_mask = quantize_int8_two_stage_groupwise(
-            A_2d.contiguous(), group_size, topk_elements
-        )
-        # A_i8: [M, K], A_scales: [M, num_groups, 2], A_mask: [M, num_groups, group_size]
-        
-        # Quantize B with standard groupwise scaling along K (B is [K, N])
-        # Transpose to [N, K], quantize, then transpose back
-        B_t = B.T.contiguous()  # [N, K]
-        B_t_i8, B_scales = quantize_int8_groupwise(B_t, group_size)
-        # B_t_i8: [N, K], B_scales: [N, num_groups]
-        
-        # For matmul A @ B, we need B in [K, N] format
-        B_i8 = B_t_i8.T.contiguous()  # [K, N]
-        
-        # Reshape A mask to [M, K]
-        num_groups = (K + group_size - 1) // group_size
-        A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]  # [M, K]
-        
-        # Two-stage scaled matmul (only A uses two-stage)
-        out = scaled_int8_mm_two_stage(
-            A_i8.contiguous(),
-            B_i8,
-            A_scales.contiguous(),
-            B_scales.contiguous(),
-            A_mask_2d.contiguous(),
-            group_size,
-        )
-    else:
-        # Standard group-wise quantization
-        # Quantize A with group-wise scaling along K
-        A_i8, A_scales = quantize_int8_groupwise(A_2d.contiguous(), group_size)
-        # A_i8: [M, K], A_scales: [M, num_groups]
-        
-        # Quantize B with group-wise scaling along K (B is [K, N])
-        # We need to quantize along K dimension (rows of B)
-        # Transpose to [N, K], quantize, then transpose back
-        B_t = B.T.contiguous()  # [N, K]
-        B_t_i8, B_scales = quantize_int8_groupwise(B_t, group_size)
-        # B_t_i8: [N, K], B_scales: [N, num_groups]
-        
-        # For matmul A @ B, we need B in [K, N] format
-        B_i8 = B_t_i8.T.contiguous()  # [K, N]
-        
-        # Group-wise scaled matmul
-        out = scaled_int8_mm_groupwise(
-            A_i8.contiguous(),
-            B_i8,
-            A_scales.contiguous(),
-            B_scales.contiguous(),
-            group_size,
-        )
+    # Quantize B with group-wise scaling along K (B is [K, N])
+    # Transpose to [N, K], quantize, then transpose back
+    B_t = B.T.contiguous()  # [N, K]
+    B_t_quant, B_scales = quantize_fp8_groupwise(B_t, group_size, fp8_format)
+    # B_t_quant: [N, K], B_scales: [N, num_groups]
     
-    return out.view(*orig_shape[:-1], out.shape[-1])
+    # For matmul A @ B, we need B in [K, N] format
+    B_quant = B_t_quant.T.contiguous()  # [K, N]
+    
+    # Group-wise scaled matmul
+    out = scaled_fp8_mm_groupwise(
+        A_quant.contiguous(),
+        B_quant,
+        A_scales.contiguous(),
+        B_scales.contiguous(),
+        group_size,
+    )
+    
+    return out.view(*orig_shape[:-1], out.shape[-1]).to(orig_dtype)
 
 
-class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
-    """Autograd function for INT8 mixed-precision linear layer."""
+class _FP8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
+    """Autograd function for FP8 mixed-precision linear layer."""
     
     @staticmethod
     def forward(
         ctx,
         input: Tensor,
-        weight: Union[Int8MixedPrecisionTrainingLinearWeight, Tensor],
+        weight: Union[FP8MixedPrecisionTrainingLinearWeight, Tensor],
         bias: Optional[Tensor],
-        config: Optional[Int8MixedPrecisionTrainingConfig] = None,
+        config: Optional[FP8MixedPrecisionTrainingConfig] = None,
     ):
         # Unpack tensor subclass if necessary
-        if isinstance(weight, Int8MixedPrecisionTrainingLinearWeight):
+        if isinstance(weight, FP8MixedPrecisionTrainingLinearWeight):
             config = weight.config
             weight = weight._data
 
@@ -371,7 +337,7 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
         group_size = config.group_size
 
         if config.output:
-            out = _dynamic_int8_mm(input, weight.T, group_size, config)
+            out = _dynamic_fp8_mm(input, weight.T, group_size, config, is_backward=False)
         else:
             out = input @ weight.T
         out = out + bias if bias is not None else out
@@ -388,7 +354,7 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             if config.grad_input:
-                grad_input = _dynamic_int8_mm(grad_output, weight, group_size, config)
+                grad_input = _dynamic_fp8_mm(grad_output, weight, group_size, config, is_backward=True)
             else:
                 grad_input = grad_output @ weight
 
@@ -396,7 +362,7 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
             grad_output_2d = grad_output.view(-1, weight.shape[0])
             input_2d = input.view(-1, weight.shape[1])
             if config.grad_weight:
-                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d, group_size, config).T
+                grad_weight = _dynamic_fp8_mm(input_2d.T, grad_output_2d, group_size, config, is_backward=True).T
             else:
                 grad_weight = grad_output_2d.T @ input_2d
 
@@ -407,33 +373,33 @@ class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):
 
 
 # Register the custom F.linear implementation for the tensor subclass
-@Int8MixedPrecisionTrainingLinearWeight.implements(torch.nn.functional.linear)
-def _int8_linear_impl(func, types, args, kwargs):
+@FP8MixedPrecisionTrainingLinearWeight.implements(torch.nn.functional.linear)
+def _fp8_linear_impl(func, types, args, kwargs):
     if torch.is_autocast_enabled("cuda"):
         dtype = torch.get_autocast_gpu_dtype()
         args = tuple(x.to(dtype) if x is not None else x for x in args)
-    return _Int8MixedPrecisionTrainingLinearFunction.apply(*args, **kwargs)
+    return _FP8MixedPrecisionTrainingLinearFunction.apply(*args, **kwargs)
 
 
-class _Int8MatmulFunction(torch.autograd.Function):
-    """Autograd function for INT8 matmul: A @ B where B is Int8 weight (possibly transposed)."""
+class _FP8MatmulFunction(torch.autograd.Function):
+    """Autograd function for FP8 matmul: A @ B where B is FP8 weight (possibly transposed)."""
     
     @staticmethod
-    def forward(ctx, input: Tensor, weight_data: Tensor, config: Int8MixedPrecisionTrainingConfig):
+    def forward(ctx, input: Tensor, weight_data: Tensor, config: FP8MixedPrecisionTrainingConfig):
         """
-        Compute input @ weight_data using INT8 quantization.
+        Compute input @ weight_data using FP8 quantization.
         
         Args:
             input: Activation tensor [..., K]
             weight_data: Weight tensor [K, N] (already transposed if needed)
-            config: INT8 training config
+            config: FP8 training config
         """
         ctx.config = config
         ctx.save_for_backward(input, weight_data)
         group_size = config.group_size
         
         if config.output:
-            out = _dynamic_int8_mm(input, weight_data, group_size, config)
+            out = _dynamic_fp8_mm(input, weight_data, group_size, config, is_backward=False)
         else:
             out = input @ weight_data
         return out
@@ -449,95 +415,91 @@ class _Int8MatmulFunction(torch.autograd.Function):
         # grad_input = grad_output @ weight_data.T
         if ctx.needs_input_grad[0]:
             if config.grad_input:
-                grad_input = _dynamic_int8_mm(grad_output, weight_data.T, group_size, config)
+                grad_input = _dynamic_fp8_mm(grad_output, weight_data.T, group_size, config, is_backward=True)
             else:
                 grad_input = grad_output @ weight_data.T
         
-        # grad_weight = input.T @ grad_output -> need grad for weight_data which is [K, N]
-        # So grad_weight_data = input.T @ grad_output where input is [..., K], grad_output is [..., N]
+        # grad_weight = input.T @ grad_output
         if ctx.needs_input_grad[1]:
-            input_2d = input.reshape(-1, input.shape[-1])  # [batch, K]
-            grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])  # [batch, N]
+            input_2d = input.reshape(-1, input.shape[-1])
+            grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
             if config.grad_weight:
-                grad_weight = _dynamic_int8_mm(input_2d.T, grad_output_2d, group_size, config)  # [K, N]
+                grad_weight = _dynamic_fp8_mm(input_2d.T, grad_output_2d, group_size, config, is_backward=True)
             else:
-                grad_weight = input_2d.T @ grad_output_2d  # [K, N]
+                grad_weight = input_2d.T @ grad_output_2d
         
         return grad_input, grad_weight, None
 
 
-def _get_int8_weight_and_config(tensor):
-    """Extract weight data and config from Int8 tensor or its transpose."""
-    if isinstance(tensor, Int8MixedPrecisionTrainingLinearWeight):
+def _get_fp8_weight_and_config(tensor):
+    """Extract weight data and config from FP8 tensor or its transpose."""
+    if isinstance(tensor, FP8MixedPrecisionTrainingLinearWeight):
         return tensor._data, tensor.config, False
     return None, None, False
 
 
-# Register aten.mm for Int8 weight support (used by Megatron's parallel linear layers)
-@Int8MixedPrecisionTrainingLinearWeight.implements(aten.mm.default)
-def _int8_mm_dispatch(func, types, args, kwargs):
-    """Handle aten.mm when one operand is Int8MixedPrecisionTrainingLinearWeight."""
+# Register aten.mm for FP8 weight support (used by Megatron's parallel linear layers)
+@FP8MixedPrecisionTrainingLinearWeight.implements(aten.mm.default)
+def _fp8_mm_dispatch(func, types, args, kwargs):
+    """Handle aten.mm when one operand is FP8MixedPrecisionTrainingLinearWeight."""
     A, B = args[0], args[1]
     
-    # Case 1: A @ B where B is Int8 weight (common: input @ weight.T)
-    if isinstance(B, Int8MixedPrecisionTrainingLinearWeight):
-        return _Int8MatmulFunction.apply(A, B._data, B.config)
+    # Case 1: A @ B where B is FP8 weight
+    if isinstance(B, FP8MixedPrecisionTrainingLinearWeight):
+        return _FP8MatmulFunction.apply(A, B._data, B.config)
     
-    # Case 2: A @ B where A is Int8 weight (rare, but handle for completeness)
-    if isinstance(A, Int8MixedPrecisionTrainingLinearWeight):
-        # For A @ B where A is weight, we need special handling
-        # This typically happens in grad_weight computation
+    # Case 2: A @ B where A is FP8 weight
+    if isinstance(A, FP8MixedPrecisionTrainingLinearWeight):
         config = A.config
         if config.grad_weight:
-            return _dynamic_int8_mm(A._data, B, config.group_size, config)
+            return _dynamic_fp8_mm(A._data, B, config.group_size, config, is_backward=True)
         else:
             return A._data @ B
     
-    # Fallback (should not reach here)
-    raise RuntimeError("_int8_mm_dispatch called but no Int8 weight found")
+    raise RuntimeError("_fp8_mm_dispatch called but no FP8 weight found")
 
 
-# Also register aten.matmul for broader coverage (torch.matmul may dispatch here for 2D tensors)
-@Int8MixedPrecisionTrainingLinearWeight.implements(aten.matmul.default)
-def _int8_matmul_dispatch(func, types, args, kwargs):
-    """Handle aten.matmul when one operand is Int8MixedPrecisionTrainingLinearWeight."""
+# Also register aten.matmul for broader coverage
+@FP8MixedPrecisionTrainingLinearWeight.implements(aten.matmul.default)
+def _fp8_matmul_dispatch(func, types, args, kwargs):
+    """Handle aten.matmul when one operand is FP8MixedPrecisionTrainingLinearWeight."""
     A, B = args[0], args[1]
     
     # For 2D @ 2D, behavior is same as aten.mm
     if A.dim() == 2 and B.dim() == 2:
-        if isinstance(B, Int8MixedPrecisionTrainingLinearWeight):
-            return _Int8MatmulFunction.apply(A, B._data, B.config)
-        if isinstance(A, Int8MixedPrecisionTrainingLinearWeight):
+        if isinstance(B, FP8MixedPrecisionTrainingLinearWeight):
+            return _FP8MatmulFunction.apply(A, B._data, B.config)
+        if isinstance(A, FP8MixedPrecisionTrainingLinearWeight):
             config = A.config
             if config.grad_weight:
-                return _dynamic_int8_mm(A._data, B, config.group_size, config)
+                return _dynamic_fp8_mm(A._data, B, config.group_size, config, is_backward=True)
             else:
                 return A._data @ B
     
-    # For higher-dim matmul, handle B being Int8 weight
-    if isinstance(B, Int8MixedPrecisionTrainingLinearWeight):
-        return _Int8MatmulFunction.apply(A, B._data, B.config)
+    # For higher-dim matmul
+    if isinstance(B, FP8MixedPrecisionTrainingLinearWeight):
+        return _FP8MatmulFunction.apply(A, B._data, B.config)
     
-    if isinstance(A, Int8MixedPrecisionTrainingLinearWeight):
+    if isinstance(A, FP8MixedPrecisionTrainingLinearWeight):
         config = A.config
         if config.grad_weight:
-            return _dynamic_int8_mm(A._data, B, config.group_size, config)
+            return _dynamic_fp8_mm(A._data, B, config.group_size, config, is_backward=True)
         else:
             return A._data @ B
     
-    raise RuntimeError("_int8_matmul_dispatch called but no Int8 weight found")
+    raise RuntimeError("_fp8_matmul_dispatch called but no FP8 weight found")
 
 
-class Int8MixedPrecisionTrainingLinear(nn.Linear):
-    """Drop-in replacement for nn.Linear with INT8 mixed-precision training."""
+class FP8MixedPrecisionTrainingLinear(nn.Linear):
+    """Drop-in replacement for nn.Linear with FP8 mixed-precision training."""
     
     def __init__(
-        self, *args, config: Int8MixedPrecisionTrainingConfig, **kwargs
+        self, *args, config: FP8MixedPrecisionTrainingConfig, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
         self.config = config
 
     def forward(self, input: Tensor) -> Tensor:
-        return _Int8MixedPrecisionTrainingLinearFunction.apply(
+        return _FP8MixedPrecisionTrainingLinearFunction.apply(
             input, self.weight, self.bias, self.config
         )

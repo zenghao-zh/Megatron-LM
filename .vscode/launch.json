@@ -376,7 +376,7 @@
                 // INT8 混合精度训练
                 "--int8-mixed-precision-training",
                 "--int8-mp-group-size", "64",
-                "--int8-mp-enable-backward-at-iter", "2000",
+                // "--int8-mp-enable-backward-at-iter", "2000",
                 
                 // === MODEL_PARALLEL_ARGS ===
                 "--tensor-model-parallel-size", "1",
@@ -392,7 +392,7 @@
                 // === EVAL_AND_LOGGING_ARGS ===
                 "--log-interval", "1",
                 "--save-interval", "1000",
-                "--eval-interval", "5000",
+                "--eval-interval", "6000",
                 "--eval-iters", "1",
                 "--save", "/root/data/megatron-models/checkpoints/smollm-360m-int8-fw-mlp-4gpu",
                 // "--wandb-project", "megatron-training-smollm",

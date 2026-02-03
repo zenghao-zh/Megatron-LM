@@ -85,6 +85,14 @@ TRAINING_ARGS=(
     --int8-mixed-precision-training
     # --int8-mp-verbose  # 打印每个层的INT8状态
     --int8-mp-group-size 64
+    --int8-mp-two-stage   # 使用两阶段量化
+    --int8-mp-topk 16            # top-k的k值
+    ## FP
+    # --fp8-mixed-precision-training
+    # --fp8-mp-group-size 64           # groupwise量化组大小
+    # --fp8-mp-forward-dtype e4m3      # 前向传播使用E4M3（更高精度）
+    # --fp8-mp-backward-dtype e4m3     # 反向传播使用E5M2（更大动态范围）
+    ## FP
     # --no-int8-mp-grad-input
     # --int8-mp-enable-backward-at-iter 2000  # 在2000步时启用INT8 backward
 )
@@ -125,7 +133,7 @@ EVAL_AND_LOGGING_ARGS=(
     --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH
     --wandb-project megatron-training-smollm
     --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH

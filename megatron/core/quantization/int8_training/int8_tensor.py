@@ -25,6 +25,7 @@ from .config import Int8MixedPrecisionTrainingConfig
 from .int8_mm import (
     quantize_int8_rowwise, 
     quantize_int8_groupwise,
+    quantize_int8_groupwise_along_k,
     quantize_int8_two_stage_groupwise,
     scaled_int8_mm,
     scaled_int8_mm_groupwise,
@@ -280,6 +281,7 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
     """
     # A may have more than 2 dims
     orig_shape = A.shape
+    orig_dtype = A.dtype  # Save original dtype for output conversion
     A_2d = A.reshape(-1, A.shape[-1])  # [M, K]
     K = A_2d.shape[-1]
     
@@ -290,60 +292,41 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
         # Two-stage quantization for A (activation), standard groupwise for B (weight)
         topk_elements = config.topk_elements if config else 16
         
-        # Quantize A with two-stage scaling
+        # Quantize A with two-stage scaling (returns fp32 scales)
+        # Note: quantize function handles contiguous internally
         A_i8, A_scales, A_mask = quantize_int8_two_stage_groupwise(
-            A_2d.contiguous(), group_size, topk_elements
+            A_2d, group_size, topk_elements
         )
-        # A_i8: [M, K], A_scales: [M, num_groups, 2], A_mask: [M, num_groups, group_size]
+        # A_i8: [M, K], A_scales: [M, num_groups, 2] (fp32), A_mask: [M, num_groups, group_size]
         
-        # Quantize B with standard groupwise scaling along K (B is [K, N])
-        # Transpose to [N, K], quantize, then transpose back
-        B_t = B.T.contiguous()  # [N, K]
-        B_t_i8, B_scales = quantize_int8_groupwise(B_t, group_size)
-        # B_t_i8: [N, K], B_scales: [N, num_groups]
-        
-        # For matmul A @ B, we need B in [K, N] format
-        B_i8 = B_t_i8.T.contiguous()  # [K, N]
+        # Quantize B directly along K dimension (no transpose needed!)
+        B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
+        # B_i8: [K, N], B_scales: [N, num_groups] (fp32)
         
         # Reshape A mask to [M, K]
         num_groups = (K + group_size - 1) // group_size
-        A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]  # [M, K]
+        A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]
         
-        # Two-stage scaled matmul (only A uses two-stage)
+        # Two-stage scaled matmul
         out = scaled_int8_mm_two_stage(
-            A_i8.contiguous(),
-            B_i8,
-            A_scales.contiguous(),
-            B_scales.contiguous(),
-            A_mask_2d.contiguous(),
-            group_size,
+            A_i8, B_i8, A_scales, B_scales, A_mask_2d, group_size
         )
     else:
         # Standard group-wise quantization
-        # Quantize A with group-wise scaling along K
-        A_i8, A_scales = quantize_int8_groupwise(A_2d.contiguous(), group_size)
+        A_i8, A_scales = quantize_int8_groupwise(A_2d, group_size)
         # A_i8: [M, K], A_scales: [M, num_groups]
         
-        # Quantize B with group-wise scaling along K (B is [K, N])
-        # We need to quantize along K dimension (rows of B)
-        # Transpose to [N, K], quantize, then transpose back
-        B_t = B.T.contiguous()  # [N, K]
-        B_t_i8, B_scales = quantize_int8_groupwise(B_t, group_size)
-        # B_t_i8: [N, K], B_scales: [N, num_groups]
-        
-        # For matmul A @ B, we need B in [K, N] format
-        B_i8 = B_t_i8.T.contiguous()  # [K, N]
+        # Quantize B directly along K dimension (no transpose needed!)
+        B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
+        # B_i8: [K, N], B_scales: [N, num_groups] (fp32)
         
         # Group-wise scaled matmul
         out = scaled_int8_mm_groupwise(
-            A_i8.contiguous(),
-            B_i8,
-            A_scales.contiguous(),
-            B_scales.contiguous(),
-            group_size,
+            A_i8, B_i8, A_scales, B_scales, group_size
         )
     
-    return out.view(*orig_shape[:-1], out.shape[-1])
+    # Convert output back to original dtype (e.g., bf16)
+    return out.to(orig_dtype).view(*orig_shape[:-1], out.shape[-1])
 
 
 class _Int8MixedPrecisionTrainingLinearFunction(torch.autograd.Function):

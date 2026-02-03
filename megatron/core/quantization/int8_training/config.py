@@ -37,15 +37,16 @@ class Int8MixedPrecisionTrainingConfig:
         quantization_method: Quantization method (default: 'groupwise')
             - 'groupwise': Single-stage group-wise quantization (one scale per group)
             - 'two_stage': Two-stage quantization (separate scales for top-k outliers and others)
+            - 'two_stage_mixed': Mixed precision two-stage (INT8 for top-k, INT4 for others)
         topk_elements: Number of top-k elements per group for two-stage quantization (default: 16)
-            Only used when quantization_method='two_stage'.
+            Only used when quantization_method='two_stage' or 'two_stage_mixed'.
             For group_size=64, topk_elements=16 means top 25% outliers get their own scale.
     """
     output: bool = True
     grad_input: bool = True
     grad_weight: bool = False  # Default False for better convergence
     group_size: int = 64  # Default 64 for TP compatibility
-    quantization_method: str = 'groupwise'  # 'groupwise' or 'two_stage'
+    quantization_method: str = 'groupwise'  # 'groupwise', 'two_stage', or 'two_stage_mixed'
     topk_elements: int = 16  # Number of top-k elements for two-stage quantization
     
     def __repr__(self):

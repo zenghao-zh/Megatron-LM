@@ -2277,9 +2277,12 @@ def _add_mixed_precision_args(parser):
     group.add_argument('--int8-mp-two-stage', action='store_true',
                        help='Enable two-stage quantization: top-k outliers and remaining elements '
                        'use separate scales for higher precision. (Default: disabled)')
+    group.add_argument('--int8-mp-two-stage-mixed', action='store_true',
+                       help='Enable mixed precision two-stage: INT8 for top-k, INT4 for others. '
+                       'Reduces precision for small values to save memory. (Default: disabled)')
     group.add_argument('--int8-mp-topk', type=int, default=16,
                        help='Number of top-k elements per group for two-stage quantization. '
-                       'Only used when --int8-mp-two-stage is enabled. (Default: 16)')
+                       'Only used when --int8-mp-two-stage or --int8-mp-two-stage-mixed is enabled. (Default: 16)')
     group.add_argument('--int8-mp-all-layers', action='store_true',
                        help='Apply INT8 to ALL Linear layers including lm_head/output_layer. '
                        '(Default: exclude lm_head for better convergence)')

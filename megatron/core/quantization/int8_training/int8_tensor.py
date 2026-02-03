@@ -27,6 +27,7 @@ from .int8_mm import (
     quantize_int8_groupwise,
     quantize_int8_groupwise_along_k,
     quantize_int8_two_stage_groupwise,
+    quantize_int8_int4_two_stage_groupwise,
     scaled_int8_mm,
     scaled_int8_mm_groupwise,
     scaled_int8_mm_two_stage,
@@ -268,7 +269,10 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
     """Dynamically quantize A and B to INT8 with group-wise or two-stage scaling.
     
     Each group of `group_size` elements along K dimension has its own scale(s).
-    If config.quantization_method == 'two_stage', uses two-stage quantization.
+    Supports multiple quantization methods via config.quantization_method:
+    - 'groupwise': Standard group-wise INT8 quantization
+    - 'two_stage': Two-stage INT8 quantization (separate scales for top-k and others)
+    - 'two_stage_mixed': Mixed precision (INT8 for top-k, INT4 for others)
     
     Args:
         A: Activation tensor [..., K]
@@ -285,10 +289,37 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
     A_2d = A.reshape(-1, A.shape[-1])  # [M, K]
     K = A_2d.shape[-1]
     
-    # Check if we should use two-stage quantization
-    use_two_stage = config is not None and config.quantization_method == 'two_stage'
+    # Determine quantization method
+    quant_method = config.quantization_method if config else 'groupwise'
+    use_two_stage = quant_method == 'two_stage'
+    use_two_stage_mixed = quant_method == 'two_stage_mixed'
     
-    if use_two_stage:
+    if use_two_stage_mixed:
+        # Mixed precision two-stage: INT8 for top-k, INT4 range for others
+        # Uses same matmul kernel as two_stage but with INT4 precision for others
+        topk_elements = config.topk_elements if config else 16
+        
+        # Quantize A with mixed precision (top-k: INT8 [-127,127], others: INT4 range [-7,7])
+        # Returns combined tensor (unpacked) for fast matmul
+        A_i8, A_scales, A_mask = quantize_int8_int4_two_stage_groupwise(
+            A_2d, group_size, topk_elements
+        )
+        # A_i8: [M, K] INT8 tensor (topk + others combined)
+        # A_scales: [M, num_groups, 2] where [:,:,0] is scale_topk, [:,:,1] is scale_others
+        # A_mask: [M, num_groups, group_size] bool mask
+        
+        # Quantize B directly along K dimension
+        B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
+        
+        # Reshape A mask to [M, K]
+        num_groups = (K + group_size - 1) // group_size
+        A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]
+        
+        # Use standard two-stage matmul (works with combined A tensor)
+        out = scaled_int8_mm_two_stage(
+            A_i8, B_i8, A_scales, B_scales, A_mask_2d, group_size
+        )
+    elif use_two_stage:
         # Two-stage quantization for A (activation), standard groupwise for B (weight)
         topk_elements = config.topk_elements if config else 16
         
@@ -319,6 +350,9 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
         # Quantize B directly along K dimension (no transpose needed!)
         B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
         # B_i8: [K, N], B_scales: [N, num_groups] (fp32)
+        
+        # Ensure scales have same dtype (fp32 for precision)
+        A_scales = A_scales.float()
         
         # Group-wise scaled matmul
         out = scaled_int8_mm_groupwise(

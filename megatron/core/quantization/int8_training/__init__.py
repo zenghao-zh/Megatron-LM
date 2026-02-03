@@ -45,6 +45,7 @@ from megatron.core.quantization.int8_training.int8_tensor import (
 )
 from megatron.core.quantization.int8_training.int8_mm import (
     quantize_int8_two_stage_groupwise,
+    quantize_int8_int4_two_stage_groupwise,
     scaled_int8_mm_two_stage,
 )
 
@@ -785,8 +786,13 @@ def apply_int8_training_from_args(model, args):
     # Get current iteration (important for resume training)
     current_iteration = getattr(args, 'iteration', 0)
     
-    # Determine quantization method based on --int8-mp-two-stage flag
-    quantization_method = 'two_stage' if getattr(args, 'int8_mp_two_stage', False) else 'groupwise'
+    # Determine quantization method based on flags
+    if getattr(args, 'int8_mp_two_stage_mixed', False):
+        quantization_method = 'two_stage_mixed'  # INT8 for top-k, INT4 for others
+    elif getattr(args, 'int8_mp_two_stage', False):
+        quantization_method = 'two_stage'  # INT8 for both top-k and others
+    else:
+        quantization_method = 'groupwise'  # Standard single-stage
     topk_elements = getattr(args, 'int8_mp_topk', 16)
     
     if enable_backward_at_iter is not None and current_iteration < enable_backward_at_iter:
@@ -823,7 +829,9 @@ def apply_int8_training_from_args(model, args):
         )
     
     # Print quantization method info
-    if quantization_method == 'two_stage':
+    if quantization_method == 'two_stage_mixed':
+        print_rank_0(f'  Using two-stage mixed precision: top-{topk_elements} INT8, others INT4')
+    elif quantization_method == 'two_stage':
         print_rank_0(f'  Using two-stage quantization: top-{topk_elements} outliers per group')
     else:
         print_rank_0(f'  Using standard group-wise quantization')

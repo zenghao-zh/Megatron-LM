@@ -1254,3 +1254,279 @@ def quantize_int8_two_stage_groupwise(
             tensor, group_size, topk_elements, stochastic_rounding, eps
         )
 
+
+# ============================================================================
+# Mixed Precision Two-Stage Quantization: INT8 (top-k) + INT4 (others)
+# ============================================================================
+
+if HAS_TRITON:
+    @triton.jit
+    def _quantize_int8_int4_two_stage_kernel(
+        # Input/Output pointers
+        input_ptr,      # [M, K] input tensor
+        output_ptr,     # [M, K] int8 output tensor  
+        scales_ptr,     # [M, num_groups, 2] scales output
+        mask_ptr,       # [M, num_groups, group_size] bool mask output
+        # Dimensions
+        M, K, num_groups,
+        # Strides
+        stride_input_m, stride_input_k,
+        stride_output_m, stride_output_k,
+        stride_scales_m, stride_scales_g, stride_scales_s,
+        stride_mask_m, stride_mask_g, stride_mask_k,
+        # Parameters
+        eps: tl.constexpr,
+        topk_k: tl.constexpr,
+        GROUP_SIZE: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+    ):
+        """Triton kernel for mixed precision INT8+INT4 two-stage quantization.
+        
+        Top-k elements -> INT8 [-127, 127], scale = max/127
+        Others elements -> INT4 [-7, 7], scale = max/7
+        Both stored in same INT8 tensor (combined).
+        """
+        pid_m = tl.program_id(0)
+        pid_g = tl.program_id(1)
+        
+        rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = rm < M
+        
+        group_start_k = pid_g * GROUP_SIZE
+        rk = tl.arange(0, GROUP_SIZE)
+        k_indices = group_start_k + rk
+        col_mask = k_indices < K
+        
+        load_mask = row_mask[:, None] & col_mask[None, :]
+        
+        input_ptrs = input_ptr + rm[:, None] * stride_input_m + k_indices[None, :] * stride_input_k
+        data = tl.load(input_ptrs, mask=load_mask, other=0.0)
+        abs_data = tl.abs(data)
+        
+        # Sort-based Top-K Selection
+        abs_for_sort = tl.where(col_mask[None, :], abs_data, float('-inf'))
+        sorted_abs = tl.sort(abs_for_sort, dim=1, descending=True)
+        
+        position = tl.arange(0, GROUP_SIZE)[None, :]
+        is_in_topk_sorted = position < topk_k
+        
+        topk_vals_sorted = tl.where(is_in_topk_sorted, sorted_abs, float('inf'))
+        threshold = tl.min(topk_vals_sorted, axis=1)
+        
+        max_topk_vals = tl.where(is_in_topk_sorted, sorted_abs, float('-inf'))
+        max_topk = tl.max(max_topk_vals, axis=1)
+        
+        # Create top-k mask
+        above_threshold = abs_data > threshold[:, None]
+        count_above = tl.sum(above_threshold.to(tl.int32), axis=1)
+        at_threshold = (abs_data == threshold[:, None]) & col_mask[None, :]
+        need_from_ties = topk_k - count_above
+        at_threshold_int = at_threshold.to(tl.int32)
+        cumsum_ties = tl.cumsum(at_threshold_int, axis=1)
+        selected_ties = at_threshold & (cumsum_ties <= need_from_ties[:, None])
+        topk_mask = above_threshold | selected_ties
+        
+        # Compute scales: topk/127, others/7
+        max_topk_f32 = max_topk.to(tl.float32)
+        scale_topk = max_topk_f32 / 127.0
+        
+        abs_others = tl.where(topk_mask | (~col_mask[None, :]), 0.0, abs_data)
+        max_others = tl.max(abs_others, axis=1)
+        max_others_f32 = max_others.to(tl.float32)
+        scale_others = max_others_f32 / 7.0  # INT4 scale
+        
+        # Quantize with different ranges
+        inv_scale_topk = 1.0 / tl.maximum(scale_topk, eps)
+        inv_scale_others = 1.0 / tl.maximum(scale_others, eps)
+        inv_scale = tl.where(topk_mask, inv_scale_topk[:, None], inv_scale_others[:, None])
+        
+        scaled_data = data.to(tl.float32) * inv_scale
+        rounded = tl.math.floor(scaled_data + 0.5)
+        
+        # Clamp: topk to [-127, 127], others to [-7, 7]
+        clamped_topk = tl.minimum(tl.maximum(rounded, -127.0), 127.0)
+        clamped_others = tl.minimum(tl.maximum(rounded, -7.0), 7.0)
+        clamped = tl.where(topk_mask, clamped_topk, clamped_others)
+        int8_data = clamped.to(tl.int8)
+        
+        # Store outputs
+        output_ptrs = output_ptr + rm[:, None] * stride_output_m + k_indices[None, :] * stride_output_k
+        tl.store(output_ptrs, int8_data, mask=load_mask)
+        
+        scale_topk_ptrs = scales_ptr + rm * stride_scales_m + pid_g * stride_scales_g + 0 * stride_scales_s
+        scale_others_ptrs = scales_ptr + rm * stride_scales_m + pid_g * stride_scales_g + 1 * stride_scales_s
+        tl.store(scale_topk_ptrs, scale_topk, mask=row_mask)
+        tl.store(scale_others_ptrs, scale_others, mask=row_mask)
+        
+        mask_ptrs = mask_ptr + rm[:, None] * stride_mask_m + pid_g * stride_mask_g + rk[None, :] * stride_mask_k
+        tl.store(mask_ptrs, topk_mask, mask=load_mask)
+
+
+@torch.no_grad()
+def _quantize_int8_int4_two_stage_triton(
+    tensor: Tensor, 
+    group_size: int = 64, 
+    topk_elements: int = 16,
+    eps: float = 1e-20
+):
+    """Triton-accelerated mixed precision INT8+INT4 quantization."""
+    M, K = tensor.shape
+    orig_K = K
+    
+    if K % group_size != 0:
+        pad_size = group_size - (K % group_size)
+        tensor = torch.nn.functional.pad(tensor, (0, pad_size), value=0)
+        K = K + pad_size
+    else:
+        pad_size = 0
+    
+    num_groups = K // group_size
+    topk_elements = min(topk_elements, group_size)
+    tensor = tensor.contiguous()
+    
+    int8_output = torch.empty(M, K, dtype=torch.int8, device=tensor.device)
+    scales = torch.empty(M, num_groups, 2, dtype=torch.float32, device=tensor.device)
+    topk_mask = torch.empty(M, num_groups, group_size, dtype=torch.bool, device=tensor.device)
+    
+    BLOCK_M = 32 if M >= 32 else (16 if M >= 16 else 8)
+    grid = (triton.cdiv(M, BLOCK_M), num_groups)
+    
+    _quantize_int8_int4_two_stage_kernel[grid](
+        tensor, int8_output, scales, topk_mask,
+        M, K, num_groups,
+        tensor.stride(0), tensor.stride(1),
+        int8_output.stride(0), int8_output.stride(1),
+        scales.stride(0), scales.stride(1), scales.stride(2),
+        topk_mask.stride(0), topk_mask.stride(1), topk_mask.stride(2),
+        eps=eps,
+        topk_k=topk_elements,
+        GROUP_SIZE=group_size,
+        BLOCK_M=BLOCK_M,
+    )
+    
+    if pad_size > 0:
+        int8_output = int8_output[:, :orig_K]
+    
+    return int8_output, scales, topk_mask
+
+
+@torch.no_grad()
+def quantize_int8_int4_two_stage_groupwise(
+    tensor: Tensor, 
+    group_size: int = 64, 
+    topk_elements: int = 16,
+    stochastic_rounding: bool = False, 
+    eps: float = 1e-20
+):
+    """Quantize tensor with mixed precision: INT8 for top-k, INT4 for others.
+    
+    This two-stage quantization uses higher precision (INT8) for the largest
+    values (top-k) and lower precision (INT4 range [-7,7]) for remaining smaller values.
+    INT4 values are stored as INT8 for compute efficiency.
+    
+    Use with scaled_int8_mm_two_stage for fast matrix multiplication.
+    
+    Args:
+        tensor: Input tensor of shape [M, K]
+        group_size: Number of elements per group (default: 64)
+        topk_elements: Number of top-k elements per group using INT8 (default: 16)
+        stochastic_rounding: If True, use stochastic rounding
+        eps: Small value to prevent division by zero
+        
+    Returns:
+        Tuple of:
+        - A_combined: [M, K] INT8 tensor (topk in [-127,127] + others in [-7,7] combined)
+        - scales: [M, num_groups, 2] where scales[:,:,0] is scale_topk, scales[:,:,1] is scale_others
+        - topk_mask: [M, num_groups, group_size] bool mask indicating top-k positions
+        
+    Example:
+        >>> A_i8, A_scales, A_mask = quantize_int8_int4_two_stage_groupwise(A, 64, 16)
+        >>> B_i8, B_scales = quantize_int8_groupwise_along_k(B, 64)
+        >>> C = scaled_int8_mm_two_stage(A_i8, B_i8, A_scales, B_scales, A_mask.reshape(M,-1)[:,:K], 64)
+    """
+    use_triton = (
+        HAS_TRITON 
+        and not stochastic_rounding 
+        and tensor.is_cuda
+        and (group_size & (group_size - 1)) == 0
+    )
+    
+    if use_triton:
+        return _quantize_int8_int4_two_stage_triton(tensor, group_size, topk_elements, eps)
+    else:
+        return _quantize_int8_int4_two_stage_unpacked(
+            tensor, group_size, topk_elements, stochastic_rounding, eps
+        )
+
+
+@torch.no_grad()
+def _quantize_int8_int4_two_stage_unpacked(
+    tensor: Tensor, 
+    group_size: int = 64, 
+    topk_elements: int = 16,
+    stochastic_rounding: bool = False, 
+    eps: float = 1e-20
+):
+    """Fast unpacked version: INT4 stored as INT8 for compute efficiency.
+    
+    Returns combined tensor instead of separate topk and others.
+    Use with scaled_int8_mm_two_stage for faster matmul.
+    """
+    M, K = tensor.shape
+    orig_K = K
+    
+    if K % group_size != 0:
+        pad_size = group_size - (K % group_size)
+        tensor = torch.nn.functional.pad(tensor, (0, pad_size), value=0)
+        K = K + pad_size
+    else:
+        pad_size = 0
+    
+    num_groups = K // group_size
+    topk_elements = min(topk_elements, group_size)
+    
+    tensor_grouped = tensor.reshape(M, num_groups, group_size)
+    abs_grouped = tensor_grouped.abs()
+    
+    # Find top-k
+    topk_vals, topk_indices = torch.topk(abs_grouped, k=topk_elements, dim=2, sorted=False)
+    topk_mask = torch.zeros_like(tensor_grouped, dtype=torch.bool)
+    topk_mask.scatter_(2, topk_indices, True)
+    
+    # Compute scales
+    scale_topk = (topk_vals.float().amax(dim=2) / 127.0)
+    abs_others = abs_grouped.masked_fill(topk_mask, 0)
+    scale_others = (abs_others.float().amax(dim=2) / 7.0)
+    
+    inv_scale_topk = (1.0 / scale_topk.clamp(min=eps)).unsqueeze(-1)
+    inv_scale_others = (1.0 / scale_others.clamp(min=eps)).unsqueeze(-1)
+    
+    # Quantize topk to INT8 [-127, 127]
+    tensor_topk = tensor_grouped.float() * inv_scale_topk
+    tensor_topk = torch.where(topk_mask, tensor_topk, torch.zeros_like(tensor_topk))
+    if stochastic_rounding:
+        tensor_topk = (tensor_topk + torch.rand_like(tensor_topk)).floor()
+    else:
+        tensor_topk = tensor_topk.round()
+    int8_topk = tensor_topk.clamp(-127, 127)
+    
+    # Quantize others to INT4 range [-7, 7] but store as INT8
+    tensor_others = tensor_grouped.float() * inv_scale_others
+    tensor_others = torch.where(~topk_mask, tensor_others, torch.zeros_like(tensor_others))
+    if stochastic_rounding:
+        tensor_others = (tensor_others + torch.rand_like(tensor_others)).floor()
+    else:
+        tensor_others = tensor_others.round()
+    int8_others = tensor_others.clamp(-7, 7)
+    
+    # Combine: since topk and others are mutually exclusive, we can add them
+    A_combined = (int8_topk + int8_others).to(torch.int8).reshape(M, K)
+    
+    scales = torch.stack([scale_topk, scale_others], dim=2)
+    
+    if pad_size > 0:
+        A_combined = A_combined[:, :orig_K]
+    
+    return A_combined, scales, topk_mask
+
+

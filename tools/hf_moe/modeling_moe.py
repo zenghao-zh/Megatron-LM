@@ -36,7 +36,15 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
+from transformers.utils import auto_docstring, can_return_tuple, logging
+
+try:
+    from transformers.utils import LossKwargs
+except ImportError:
+    # LossKwargs is not available in older transformers versions (e.g. 4.57.x)
+    from typing import TypedDict
+    class LossKwargs(TypedDict, total=False):
+        pass
 from .configuration_moe import MoEConfig
 from .layers import MLP2MODULE
 

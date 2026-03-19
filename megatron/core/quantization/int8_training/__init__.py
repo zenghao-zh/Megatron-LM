@@ -730,22 +730,23 @@ def apply_int8_training(
 
 
 def _default_int8_filter(name, module):
-    """Default filter: exclude lm_head, output layers, and attention layers.
+    """Default filter: exclude lm_head, output layers, and Q/K/V projections.
     
     These layers are more sensitive to INT8 precision loss:
     - lm_head/output_layer: directly affect output logits
-    - attention layers (Q/K/V/O projections): critical for model quality
+    - Q/K/V projections: critical for attention score computation
     
-    By excluding them, we apply INT8 only to FFN layers which are more robust
-    to quantization while still providing significant speedup.
+    Included in INT8:
+    - FFN layers (linear_fc1, linear_fc2)
+    - Attention O projection (linear_proj)
     """
-    # Exclude output/lm_head layers - they're sensitive to quantization
+    # Exclude output/lm_head layers and Q/K/V projections
     exclude_patterns = [
         'lm_head',
         'output_layer', 
         'final_linear',
         'head',
-        # Attention projection layers (Q, K, V, O)
+        # Attention Q/K/V projection layers (keep excluded)
         'query',           # query projection
         'key',             # key projection  
         'value',           # value projection
@@ -754,11 +755,6 @@ def _default_int8_filter(name, module):
         'v_proj',
         'qkv',             # fused QKV projection
         'linear_qkv',      # Megatron naming
-        'dense',           # attention output (common in many architectures)
-        'o_proj',          # output projection (alternative naming)
-        'out_proj',        # output projection
-        'linear_proj',     # Megatron attention output
-        'attention.linear_proj',  # More specific Megatron pattern
     ]
     name_lower = name.lower()
     for pattern in exclude_patterns:

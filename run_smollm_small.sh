@@ -5,7 +5,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6001
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m-int8-fw-mlp
+EXPERIMENT_NAME=smollm-130m-btopk
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -15,8 +15,8 @@ TOKENIZER_MODEL=/root/data/cosmo2-tokenizer
 WANDB_PATH=/root/workspace/Megatron-LM/wandb
 TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
-MAX_TRAIN_SAMPLES=50000000
-LR_WARMUP_SAMPLES=$(( 5000 * 2048 ))
+MAX_TRAIN_SAMPLES=19200000
+LR_WARMUP_SAMPLES=$(( 5000 * 128 ))
 
 
 DISTRIBUTED_ARGS=(
@@ -31,10 +31,10 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 2048
     --max-position-embeddings 2048
-    --num-layers 16
-    --hidden-size 480
-    --num-attention-heads 15
-    --ffn-hidden-size 1280
+    --num-layers 30
+    --hidden-size 576
+    --num-attention-heads 9
+    --ffn-hidden-size 1536
     --init-method-std 0.006
     --attention-dropout 0.0
     --hidden-dropout 0.0
@@ -43,7 +43,7 @@ MODEL_ARGS=(
     --swiglu
     # --untie-embeddings-and-output-weights
     --group-query-attention
-    --num-query-groups 5
+    --num-query-groups 3
     --no-masked-softmax-fusion
     --position-embedding-type rope
     --rotary-base 10000
@@ -60,7 +60,7 @@ MODEL_ARGS=(
 TRAINING_ARGS=(
     --seed 3407
     --micro-batch-size 16
-    --global-batch-size 512
+    --global-batch-size 128
     --lr 3e-3
     --train-samples $MAX_TRAIN_SAMPLES
     --lr-warmup-samples $LR_WARMUP_SAMPLES
@@ -68,7 +68,7 @@ TRAINING_ARGS=(
     # --lr-decay-multi-step 0.6 0.3 0.1
     --min-lr 1e-8
     --lr-warmup-init 1e-8
-    --weight-decay 0.1
+    --weight-decay 0.01
     --adam-beta1 0.9
     --adam-beta2 0.95
     --adam-eps 1e-8
@@ -76,14 +76,14 @@ TRAINING_ARGS=(
     --clip-grad 1.0
     --bf16
     ## 激活稀疏训练参数
-    # --act-sparse-training
-    # --act-sparse-predictor-hidden-size 64
-    # --act-sparse-bank-size 64
-    # --act-sparse-topk 8
-    # --act-sparse-btopk-coeff 0.001
-    # --act-sparse-swiglu-without-silu
-    --int8-mixed-precision-training
-    --int8-mp-verbose  # 打印每个层的INT8状态
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 16
+    --act-sparse-btopk-coeff 0.001
+    --act-sparse-swiglu-without-silu
+    # --int8-mixed-precision-training
+    # --int8-mp-verbose  # 打印每个层的INT8状态
     # --no-int8-mp-grad-input
 )
 
@@ -119,12 +119,12 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 1000
-    --eval-interval 1000
+    --save-interval 10000
+    --eval-interval 10000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
-    --wandb-project megatron-training-smollm
+    --load $CHECKPOINT_PATH
+    --wandb-project megatron-training-smollm-135M
     --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH
     --log-timers-to-tensorboard

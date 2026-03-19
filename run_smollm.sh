@@ -86,8 +86,9 @@ TRAINING_ARGS=(
     # --int8-mp-verbose  # 打印每个层的INT8状态
     --int8-mp-group-size 64
     # --int8-mp-two-stage   # 使用两阶段量化
-    --int8-mp-two-stage-mixed
-    --int8-mp-topk 16            # top-k的k值
+    # --int8-mp-two-stage-mixed
+    # --int8-mp-topk 16            # top-k的k值
+    --int8-mp-grad-weight
     ## FP
     # --fp8-mixed-precision-training
     # --fp8-mp-group-size 64           # groupwise量化组大小

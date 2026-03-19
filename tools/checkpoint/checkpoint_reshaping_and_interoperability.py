@@ -20,16 +20,17 @@ import re
 import sys
 import types
 
-# Add the tools directory to sys.path to import hf_moe
+# Add the tools directory to sys.path to import hf_moe / hf_smollm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from PIL.Image import new
 import torch
+import torch.distributed.checkpoint as dcp
 from huggingface_hub import split_torch_state_dict_into_shards
 from packaging import version
 
 from transformers import AutoTokenizer, GPT2Config
 from hf_moe import MoEConfig, MoEForCausalLM
+from hf_smollm import SmolLMConfig, SmolLMForCausalLM
 from transformers.modeling_utils import WEIGHTS_INDEX_NAME, WEIGHTS_NAME
 from transformers.utils import check_torch_load_is_safe
 from safetensors.torch import save_file as safe_save_file
@@ -158,6 +159,12 @@ tensor_parallel_params = [
     "self_attention.linear_proj.bias",
     "self_attention.linear_qkv.weight",
     "self_attention.linear_qkv.bias",
+    # dense (baseline) MLP
+    "mlp.linear_fc1.weight",
+    "mlp.linear_fc1.bias",
+    "mlp.linear_fc2.weight",
+    "mlp.linear_fc2.bias",
+    # MoE experts
     "mlp.experts.linear_fc1.weight",
     "mlp.experts.linear_fc1.bias",
     "mlp.experts.linear_fc2.weight",
@@ -453,6 +460,43 @@ def convert_checkpoint_from_megatron_to_transformers(args):
     )
     print(vocab_size)
 
+    # Determine if this is a MoE model or a baseline (dense) model
+    num_experts = getattr(megatron_args, "num_experts", None)
+    is_moe = num_experts is not None and num_experts > 0
+
+    if is_moe:
+        moe_ffn_hidden_size = getattr(megatron_args, "moe_ffn_hidden_size", megatron_args.ffn_hidden_size)
+        moe_kwargs = dict(
+            moe_layer_class="MoELayer",
+            moe_expert_class="MLP" if not getattr(megatron_args, "act_sparse_training", False) else "BalancedTopkMLP",
+            moe_intermediate_size=moe_ffn_hidden_size,
+            n_shared_experts=getattr(megatron_args, "moe_shared_expert_intermediate_size", 0) // moe_ffn_hidden_size if moe_ffn_hidden_size > 0 else 0,
+            n_routed_experts=num_experts,
+            moe_layer_freq=getattr(megatron_args, "moe_layer_freq", 1),
+            aux_loss_alpha=getattr(megatron_args, "moe_aux_loss_coeff", 1e-2),
+            num_experts_per_tok=getattr(megatron_args, "moe_router_topk", 2),
+            scoring_func=getattr(megatron_args, "moe_router_score_function", "softmax"),
+            seq_aux=True,
+            norm_topk_prob=False,
+            first_k_dense_replace=0,
+            predictor_hidden_size=getattr(megatron_args, "act_sparse_predictor_hidden_size", 64),
+            predictor_bank_size=getattr(megatron_args, "act_sparse_bank_size", 64),
+            predictor_topk=getattr(megatron_args, "act_sparse_topk", 16),
+            predictor_btopk_coeff=getattr(megatron_args, "act_sparse_btopk_coeff", 0.001),
+        )
+    else:
+        # Baseline (dense) model: use plain MLP, no MoE
+        moe_kwargs = dict(
+            moe_layer_class="MLP",
+            moe_expert_class="MLP",
+            moe_intermediate_size=megatron_args.ffn_hidden_size,
+            n_shared_experts=0,
+            n_routed_experts=0,
+            moe_layer_freq=1,
+            num_experts_per_tok=0,
+        )
+    print(f"Model type: {'MoE (num_experts={num_experts})' if is_moe else 'Baseline (dense)'}")
+
     config = MoEConfig(
         vocab_size=vocab_size,
         hidden_size=megatron_args.hidden_size,
@@ -476,24 +520,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
         attention_dropout=megatron_args.attention_dropout,
         mlp_bias=megatron_args.add_bias_linear,
         head_dim=None,
-        # moe related
-        moe_layer_class="MoELayer",
-        moe_expert_class="MLP" if not megatron_args.act_sparse_training else "BalancedTopkMLP",
-        moe_intermediate_size=megatron_args.moe_ffn_hidden_size,
-        n_shared_experts=megatron_args.moe_shared_expert_intermediate_size//megatron_args.moe_ffn_hidden_size,
-        n_routed_experts=megatron_args.num_experts,
-        moe_layer_freq=megatron_args.moe_layer_freq,
-        aux_loss_alpha=megatron_args.moe_aux_loss_coeff,
-        num_experts_per_tok=megatron_args.moe_router_topk,
-        scoring_func=megatron_args.moe_router_score_function,
-        seq_aux=True,
-        norm_topk_prob=False,
-        first_k_dense_replace=0,
-        # balanced topk mlp related
-        predictor_hidden_size=megatron_args.act_sparse_predictor_hidden_size,
-        predictor_bank_size=megatron_args.act_sparse_bank_size,
-        predictor_topk=megatron_args.act_sparse_topk,
-        predictor_btopk_coeff=megatron_args.act_sparse_btopk_coeff,
+        **moe_kwargs,
     )
 
     output_state_dict = {}
@@ -501,7 +528,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
     checkpoint_version = state_dict.get("checkpoint_version", 0.0)
     tp_size = megatron_args.tensor_model_parallel_size
     pp_size = megatron_args.pipeline_model_parallel_size
-    ep_size = megatron_args.expert_model_parallel_size
+    ep_size = getattr(megatron_args, "expert_model_parallel_size", 1)
     dtype = torch.bfloat16
     # The regex to extract layer names.
     # layer_re = re.compile(r"decoder\.layers\.(\d+)\.(.+)\.(weight)(\d*)$")
@@ -571,7 +598,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
                 params = val.to(dtype)
             else:
                 ## TODO: implement tensor parallel for moe
-                dim = 1 if op_name in ["self_attention.linear_proj", "mlp.experts.linear_fc2", "mlp.shared_experts.linear_fc2", "mlp.experts.topk_modules"] else 0
+                dim = 1 if op_name in ["self_attention.linear_proj", "mlp.linear_fc2", "mlp.experts.linear_fc2", "mlp.shared_experts.linear_fc2", "mlp.experts.topk_modules"] else 0
                 params = torch.cat(
                     [val]
                     + [
@@ -666,6 +693,21 @@ def convert_checkpoint_from_megatron_to_transformers(args):
                 output_state_dict[layer_name + ".mlp.shared_experts.down_proj.weight"] = params
             elif "mlp.shared_experts" in op_name  and "linear_fc2" in op_name and weight_or_bias=='bias':
                 pass
+            # Dense (baseline) MLP: mlp.linear_fc1 / mlp.linear_fc2 (no experts)
+            elif op_name == "mlp.linear_fc1" and weight_or_bias == "weight":
+                # linear_fc1 weight for SwiGLU: [2 * ffn_hidden, hidden] -> split into gate + up
+                fc1_weight = params
+                hidden_size = fc1_weight.shape[0] // 2
+                gate_weight = fc1_weight[:hidden_size, :]
+                up_weight = fc1_weight[hidden_size:, :]
+                output_state_dict[layer_name + ".mlp.gate_proj.weight"] = gate_weight
+                output_state_dict[layer_name + ".mlp.up_proj.weight"] = up_weight
+            elif op_name == "mlp.linear_fc1" and weight_or_bias == "bias":
+                pass  # skip bias for now
+            elif op_name == "mlp.linear_fc2" and weight_or_bias == "weight":
+                output_state_dict[layer_name + ".mlp.down_proj.weight"] = params
+            elif op_name == "mlp.linear_fc2" and weight_or_bias == "bias":
+                pass  # skip bias for now
             else:
                 raise ValueError(f"Unknown param/layer in {op_name}")
 
@@ -1065,14 +1107,290 @@ def convert_checkpoint_from_transformers_to_megatron(args):
             torch.save(output_state_dict[tp_rank], checkpoint_path)
 
 
+def detect_checkpoint_format(load_path):
+    """Detect whether the checkpoint is in legacy (mp_rank_XX) or torch_dist (.distcp) format."""
+    sub_dirs = os.listdir(load_path)
+    if any(d.startswith("mp_rank_") for d in sub_dirs):
+        return "legacy"
+    if any(f.endswith(".distcp") for f in sub_dirs):
+        return "torch_dist"
+    raise ValueError(
+        f"Cannot detect checkpoint format in {load_path}. "
+        "Expected either mp_rank_XX directories (legacy) or .distcp files (torch_dist)."
+    )
+
+
+def load_torch_dist_state_dict(ckpt_dir):
+    """Load model weights from a torch_dist format checkpoint (.distcp files)."""
+    reader = dcp.FileSystemReader(ckpt_dir)
+    metadata = reader.read_metadata()
+
+    # Filter model weight keys (exclude optimizer, extra_state, rng)
+    model_keys = [
+        k for k in sorted(metadata.state_dict_metadata.keys())
+        if not k.startswith('optimizer')
+        and '_extra_state' not in k
+        and 'rng_state' not in k
+        and 'rerun_state' not in k
+    ]
+
+    # Create empty state dict with correct shapes and dtypes
+    state_dict = {}
+    for k in model_keys:
+        md = metadata.state_dict_metadata[k]
+        state_dict[k] = torch.empty(md.size, dtype=md.properties.dtype)
+
+    # Initialize a minimal distributed process group for dcp.load
+    os.environ.setdefault('MASTER_ADDR', 'localhost')
+    os.environ.setdefault('MASTER_PORT', '29599')
+    os.environ.setdefault('RANK', '0')
+    os.environ.setdefault('WORLD_SIZE', '1')
+
+    need_destroy = False
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend='gloo')
+        need_destroy = True
+
+    try:
+        dcp.load(state_dict, storage_reader=reader)
+    finally:
+        if need_destroy:
+            torch.distributed.destroy_process_group()
+
+    return state_dict
+
+
+def load_megatron_args_from_common(ckpt_dir):
+    """Load Megatron-LM training arguments from common.pt."""
+    common_path = os.path.join(ckpt_dir, "common.pt")
+    state = torch.load(common_path, map_location="cpu", weights_only=False)
+    args = state.get("args", None)
+    if args is None:
+        raise ValueError(f"No 'args' found in {common_path}")
+    return args
+
+
+def split_qkv_weight(qkv_weight, num_attention_heads, num_query_groups, head_dim):
+    """
+    Split the fused QKV weight into separate Q, K, V projections.
+
+    In Megatron mcore with GQA, the QKV weight is organized as groups:
+    [q_heads_per_group * head_dim, k_head_dim, v_head_dim] repeated for each group.
+    """
+    q_heads_per_group = num_attention_heads // num_query_groups
+    q_size_per_group = q_heads_per_group * head_dim
+    k_size = head_dim
+    v_size = head_dim
+    group_size = q_size_per_group + k_size + v_size
+
+    groups = torch.split(qkv_weight, group_size, dim=0)
+    q_weights, k_weights, v_weights = [], [], []
+    for group in groups:
+        q_w, k_w, v_w = torch.split(group, [q_size_per_group, k_size, v_size], dim=0)
+        q_weights.append(q_w)
+        k_weights.append(k_w)
+        v_weights.append(v_w)
+
+    return torch.cat(q_weights, dim=0), torch.cat(k_weights, dim=0), torch.cat(v_weights, dim=0)
+
+
+def convert_torch_dist_baseline_to_transformers(args):
+    """
+    Convert a Megatron-LM torch_dist baseline (dense) checkpoint to HuggingFace Transformers format.
+
+    For baseline models, saves as SmolLMForCausalLM (LLaMA architecture).
+    """
+    # 1. Load megatron args
+    megatron_args = load_megatron_args_from_common(args.load_path)
+
+    # 2. Determine activation function
+    if megatron_args.swiglu:
+        activation_function = "silu"
+    elif getattr(megatron_args, "bias_gelu_fusion", False):
+        activation_function = "gelu_fast"
+    elif getattr(megatron_args, "openai_gelu", False):
+        activation_function = "gelu_new"
+    else:
+        activation_function = "gelu"
+
+    vocab_size = (
+        megatron_args.padded_vocab_size
+        if getattr(megatron_args, "orig_vocab_size", None) is None
+        else megatron_args.orig_vocab_size
+    )
+
+    # 3. Build SmolLM (LLaMA) config
+    config = SmolLMConfig(
+        vocab_size=vocab_size,
+        hidden_size=megatron_args.hidden_size,
+        intermediate_size=megatron_args.ffn_hidden_size,
+        num_hidden_layers=megatron_args.num_layers,
+        num_attention_heads=megatron_args.num_attention_heads,
+        num_key_value_heads=megatron_args.num_query_groups,
+        hidden_act=activation_function,
+        max_position_embeddings=megatron_args.max_position_embeddings,
+        initializer_range=megatron_args.init_method_std,
+        rms_norm_eps=megatron_args.norm_epsilon,
+        use_cache=True,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        pretraining_tp=1,
+        tie_word_embeddings=not getattr(megatron_args, "untie_embeddings_and_output_weights", False),
+        rope_theta=megatron_args.rotary_base,
+        rope_scaling=None,
+        attention_bias=megatron_args.add_qkv_bias,
+        attention_dropout=megatron_args.attention_dropout,
+        mlp_bias=megatron_args.add_bias_linear,
+        head_dim=None,
+    )
+    config.architectures = ["SmolLMForCausalLM"]
+    print(f"SmolLM config: hidden={config.hidden_size}, layers={config.num_hidden_layers}, "
+          f"heads={config.num_attention_heads}, kv_heads={config.num_key_value_heads}, "
+          f"ffn={config.intermediate_size}, vocab={config.vocab_size}")
+
+    # 4. Load torch_dist checkpoint
+    print(f"Loading torch_dist checkpoint from: {args.load_path}")
+    megatron_state = load_torch_dist_state_dict(args.load_path)
+    print(f"Loaded {len(megatron_state)} tensors")
+
+    # 5. Convert to HF format
+    num_layers = megatron_args.num_layers
+    num_attention_heads = megatron_args.num_attention_heads
+    num_query_groups = megatron_args.num_query_groups
+    hidden_size = megatron_args.hidden_size
+    head_dim = hidden_size // num_attention_heads
+    ffn_hidden_size = megatron_args.ffn_hidden_size
+    dtype = torch.bfloat16
+
+    output_state_dict = {}
+
+    # Embeddings
+    print("Converting embeddings...")
+    embed_weight = megatron_state["embedding.word_embeddings.weight"][:vocab_size].to(dtype)
+    output_state_dict["model.embed_tokens.weight"] = embed_weight
+
+    # Transformer layers
+    print("Converting transformer layers...")
+    for layer_idx in range(num_layers):
+        prefix = f"model.layers.{layer_idx}"
+        print(f"  Layer {layer_idx}")
+
+        # Input layernorm
+        output_state_dict[f"{prefix}.input_layernorm.weight"] = \
+            megatron_state["decoder.layers.self_attention.linear_qkv.layer_norm_weight"][layer_idx].to(dtype)
+
+        # Post-attention layernorm
+        output_state_dict[f"{prefix}.post_attention_layernorm.weight"] = \
+            megatron_state["decoder.layers.pre_mlp_layernorm.weight"][layer_idx].to(dtype)
+
+        # Self-attention QKV
+        qkv_weight = megatron_state["decoder.layers.self_attention.linear_qkv.weight"][layer_idx].to(dtype)
+        q_weight, k_weight, v_weight = split_qkv_weight(qkv_weight, num_attention_heads, num_query_groups, head_dim)
+        output_state_dict[f"{prefix}.self_attn.q_proj.weight"] = q_weight
+        output_state_dict[f"{prefix}.self_attn.k_proj.weight"] = k_weight
+        output_state_dict[f"{prefix}.self_attn.v_proj.weight"] = v_weight
+
+        # Self-attention output projection
+        output_state_dict[f"{prefix}.self_attn.o_proj.weight"] = \
+            megatron_state["decoder.layers.self_attention.linear_proj.weight"][layer_idx].to(dtype)
+
+        # MLP (SwiGLU: linear_fc1 = [gate, up] concatenated, linear_fc2 = down)
+        fc1_weight = megatron_state["decoder.layers.mlp.linear_fc1.weight"][layer_idx].to(dtype)
+        output_state_dict[f"{prefix}.mlp.gate_proj.weight"] = fc1_weight[:ffn_hidden_size, :]
+        output_state_dict[f"{prefix}.mlp.up_proj.weight"] = fc1_weight[ffn_hidden_size:, :]
+        output_state_dict[f"{prefix}.mlp.down_proj.weight"] = \
+            megatron_state["decoder.layers.mlp.linear_fc2.weight"][layer_idx].to(dtype)
+
+    # Final layernorm
+    print("Converting final layernorm...")
+    output_state_dict["model.norm.weight"] = megatron_state["decoder.final_layernorm.weight"].to(dtype)
+
+    # LM head
+    print("Converting LM head...")
+    if not getattr(megatron_args, "untie_embeddings_and_output_weights", False):
+        output_state_dict["lm_head.weight"] = embed_weight.clone()
+    else:
+        if "output_layer.weight" in megatron_state:
+            output_state_dict["lm_head.weight"] = megatron_state["output_layer.weight"][:vocab_size].to(dtype)
+        else:
+            print("  WARNING: untie_embeddings_and_output_weights=True but output_layer.weight not found, using embeddings")
+            output_state_dict["lm_head.weight"] = embed_weight.clone()
+
+    # 6. Print structure
+    if args.print_checkpoint_structure:
+        print("\nConverted checkpoint structure:")
+        recursive_print(None, output_state_dict)
+
+    # 7. Save
+    os.makedirs(args.save_path, exist_ok=True)
+
+    # Save config
+    print(f"\nSaving config to {args.save_path}")
+    config.save_pretrained(args.save_path)
+
+    # Save tokenizer
+    if args.tokenizer_name is not None:
+        print(f"Saving tokenizer from {args.tokenizer_name}")
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+        tokenizer.save_pretrained(args.save_path)
+        config.tokenizer_class = type(tokenizer).__name__
+        config.save_pretrained(args.save_path)
+
+    # Save model weights as safetensors
+    max_shard_size = int(args.max_shard_size) if args.max_shard_size.isdigit() else args.max_shard_size
+    state_dict_split = split_torch_state_dict_into_shards(output_state_dict, max_shard_size=max_shard_size)
+
+    for filename, tensors in state_dict_split.filename_to_tensors.items():
+        shard = {tensor: output_state_dict[tensor] for tensor in tensors}
+        filepath = os.path.join(args.save_path, filename)
+        safe_save_file(shard, filepath, metadata={"format": "pt"})
+        print(f"Saved {filepath}")
+
+    if state_dict_split.is_sharded:
+        index = {
+            "metadata": state_dict_split.metadata,
+            "weight_map": state_dict_split.tensor_to_filename,
+        }
+        index_path = os.path.join(args.save_path, "model.safetensors.index.json")
+        with open(index_path, "w") as f:
+            f.write(json.dumps(index, indent=2))
+        print(f"Saved shard index to {index_path}")
+
+    print("\nConversion complete!")
+    print(f"HuggingFace model saved to: {args.save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser = add_checkpointing_args(parser)
     parser = add_megatron_checkpoint_args(parser)
     parser = add_transformers_checkpoint_args(parser)
     args = parser.parse_args()
+
     if args.convert_checkpoint_from_megatron_to_transformers:
-        convert_checkpoint_from_megatron_to_transformers(args)
+        # Detect checkpoint format
+        ckpt_format = detect_checkpoint_format(args.load_path)
+        print(f"Detected checkpoint format: {ckpt_format}")
+
+        if ckpt_format == "torch_dist":
+            # Load megatron args to determine model type
+            megatron_args = load_megatron_args_from_common(args.load_path)
+            num_experts = getattr(megatron_args, "num_experts", None)
+            is_moe = num_experts is not None and num_experts > 0
+
+            if is_moe:
+                raise NotImplementedError(
+                    "MoE conversion from torch_dist format is not yet supported in this script. "
+                    "Please convert the torch_dist checkpoint to legacy format first, "
+                    "or use convert_dist_ckpt_to_hf.py."
+                )
+            else:
+                print("Converting torch_dist baseline checkpoint → SmolLM (LLaMA) format")
+                convert_torch_dist_baseline_to_transformers(args)
+        else:
+            # Legacy mp_rank_XX format
+            convert_checkpoint_from_megatron_to_transformers(args)
     else:
         convert_checkpoint_from_transformers_to_megatron(args)
 

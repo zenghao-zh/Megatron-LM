@@ -1219,7 +1219,11 @@ def convert_torch_dist_baseline_to_transformers(args):
         else megatron_args.orig_vocab_size
     )
 
-    # 3. Build SmolLM (LLaMA) config
+    # 3. Detect activation sparsity
+    act_sparse_training = getattr(megatron_args, "act_sparse_training", False)
+    swiglu_without_silu = getattr(megatron_args, "act_sparse_swiglu_without_silu", False)
+
+    # 4. Build SmolLM (LLaMA) config
     config = SmolLMConfig(
         vocab_size=vocab_size,
         hidden_size=megatron_args.hidden_size,
@@ -1243,18 +1247,24 @@ def convert_torch_dist_baseline_to_transformers(args):
         attention_dropout=megatron_args.attention_dropout,
         mlp_bias=megatron_args.add_bias_linear,
         head_dim=None,
+        act_sparse_training=act_sparse_training,
+        predictor_hidden_size=getattr(megatron_args, "act_sparse_predictor_hidden_size", 64),
+        predictor_bank_size=getattr(megatron_args, "act_sparse_bank_size", 64),
+        predictor_topk=getattr(megatron_args, "act_sparse_topk", 16),
+        swiglu_without_silu=swiglu_without_silu,
     )
     config.architectures = ["SmolLMForCausalLM"]
     print(f"SmolLM config: hidden={config.hidden_size}, layers={config.num_hidden_layers}, "
           f"heads={config.num_attention_heads}, kv_heads={config.num_key_value_heads}, "
-          f"ffn={config.intermediate_size}, vocab={config.vocab_size}")
+          f"ffn={config.intermediate_size}, vocab={config.vocab_size}, "
+          f"act_sparse={act_sparse_training}")
 
-    # 4. Load torch_dist checkpoint
+    # 5. Load torch_dist checkpoint
     print(f"Loading torch_dist checkpoint from: {args.load_path}")
     megatron_state = load_torch_dist_state_dict(args.load_path)
     print(f"Loaded {len(megatron_state)} tensors")
 
-    # 5. Convert to HF format
+    # 6. Convert to HF format
     num_layers = megatron_args.num_layers
     num_attention_heads = megatron_args.num_attention_heads
     num_query_groups = megatron_args.num_query_groups
@@ -1301,6 +1311,17 @@ def convert_torch_dist_baseline_to_transformers(args):
         output_state_dict[f"{prefix}.mlp.up_proj.weight"] = fc1_weight[ffn_hidden_size:, :]
         output_state_dict[f"{prefix}.mlp.down_proj.weight"] = \
             megatron_state["decoder.layers.mlp.linear_fc2.weight"][layer_idx].to(dtype)
+
+        # Predictor & BalancedTopk (activation sparsity)
+        if act_sparse_training:
+            output_state_dict[f"{prefix}.mlp.predictor.fc_1.weight"] = \
+                megatron_state["decoder.layers.mlp.predictor.linear_fc1.weight"][layer_idx].to(dtype)
+            output_state_dict[f"{prefix}.mlp.predictor.fc_2.weight"] = \
+                megatron_state["decoder.layers.mlp.predictor.linear_fc2.weight"][layer_idx].to(dtype)
+            output_state_dict[f"{prefix}.mlp.topk_model.balanced_bias"] = \
+                megatron_state["decoder.layers.mlp.topk_module.balanced_bias"][layer_idx]
+            output_state_dict[f"{prefix}.mlp.topk_model.num_assigned_tokens"] = \
+                megatron_state["decoder.layers.mlp.topk_module.num_assigned_tokens"][layer_idx]
 
     # Final layernorm
     print("Converting final layernorm...")

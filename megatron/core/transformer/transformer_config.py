@@ -206,6 +206,12 @@ class TransformerConfig(ModelParallelConfig):
     act_sparse_btopk_coeff: float = 0.001
     """The coefficient of the act sparse training for each bank."""
 
+    act_sparse_bias_threshold: float = -1.0
+    """Controls balanced bias update behavior:
+      < 0: bidirectional adjustment toward the mean (default);
+      = 0: only rescue completely dead experts (assigned == 0);
+      > 0: rescue experts assigned less than this fraction of the mean (e.g. 0.05 = 5%)."""
+
     act_sparse_enable_fused_balanced_topk: bool = False
     """Whether to use fused balanced topk for sparse training of activation."""
 

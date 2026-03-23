@@ -1468,7 +1468,7 @@ def collect_btopk_mlp_modules(module, modules_to_update):
         if len(list(child.children())) > 0:
             collect_btopk_mlp_modules(child, modules_to_update)
 
-def update_balanced_bias(model, u = 0.001):
+def update_balanced_bias(model, u=0.001, bias_threshold=-1.0):
     max_violation = 0
     modules_to_update = []
 
@@ -1518,7 +1518,12 @@ def update_balanced_bias(model, u = 0.001):
             e = mean - global_num_assigned
             # 关闭amp的autocast，防止balanced_bias被转为bf16
             with torch.amp.autocast('cuda', enabled=False):
-                bias_update = u * e.sign() 
+                if bias_threshold < 0:
+                    bias_update = u * e.sign()
+                elif bias_threshold == 0:
+                    bias_update = u * e.sign() * (global_num_assigned == 0)
+                else:
+                    bias_update = u * e.sign() * (global_num_assigned < mean * bias_threshold)
                 
                 # 将偏差应用到当前GPU对应的分片上
                 if expert_tp_group.size() > 1:
@@ -1611,7 +1616,11 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     mean_max_violation = None
     if config.act_sparse_training:
         for model_chunk in model:
-            mean_max_violation = update_balanced_bias(model_chunk, u = config.act_sparse_btopk_coeff)
+            mean_max_violation = update_balanced_bias(
+                model_chunk,
+                u=config.act_sparse_btopk_coeff,
+                bias_threshold=config.act_sparse_bias_threshold,
+            )
         # print_rank_0(f"mean_max_violation: {mean_max_violation}")
 
 

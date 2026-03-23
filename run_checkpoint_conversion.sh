@@ -10,9 +10,9 @@ set -x
 # EXPERIMENT_NAME=smollm-360m-int8-fw-mlp-4gpu
 # LOAD_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/iter_0097656"
 # SAVE_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/hf_smollm_iter_0097656_int8_oproj"
-EXPERIMENT_NAME=smollm-360m-int8-fw-mlp-4gpu
-LOAD_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/iter_0097656"
-SAVE_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/hf_smollm_iter_0097656_int8_oproj"
+EXPERIMENT_NAME=smollm-130m
+LOAD_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/iter_0150000_baseline"
+SAVE_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/hf_smollm_iter_0150000_baseline"
 TOKENIZER_NAME="/root/data/cosmo2-tokenizer"
 MAX_SHARD_SIZE="10GB"
 

@@ -1137,6 +1137,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['fp8_param'] = args.fp8_param_gather
     kw_args['act_sparse_training'] = args.act_sparse_training
     kw_args['act_sparse_enable_fused_balanced_topk'] = args.act_sparse_enable_fused_balanced_topk
+    kw_args['act_sparse_bias_threshold'] = args.act_sparse_bias_threshold
     if args.swiglu and not args.act_sparse_swiglu_without_silu:
         kw_args['activation_func'] = F.silu
         kw_args['no_shared_expert_activation_func'] = F.silu
@@ -2915,6 +2916,11 @@ def _add_moe_args(parser):
                        help='The topk of the act sparse training for each bank.')
     group.add_argument('--act-sparse-btopk-coeff', type=float, default=0.001,
                        help='The coefficient of the act sparse training for each bank.')
+    group.add_argument('--act-sparse-bias-threshold', type=float, default=-1.0,
+                       help='Controls balanced bias update: '
+                            '<0 = bidirectional adjustment toward mean (default); '
+                            '0 = only rescue completely dead experts (assigned==0); '
+                            '>0 = rescue experts below this fraction of mean (e.g. 0.05 = 5%%).')
     
     return parser
 

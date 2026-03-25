@@ -2,7 +2,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 GPUS_PER_NODE=4
 MASTER_ADDR=localhost
-MASTER_PORT=6001
+MASTER_PORT=6003
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 EXPERIMENT_NAME=smollm-360m-int8-fw-mlp-4gpu
@@ -86,8 +86,8 @@ TRAINING_ARGS=(
     # --int8-mp-verbose  # 打印每个层的INT8状态
     --int8-mp-group-size 64
     # --int8-mp-two-stage   # 使用两阶段量化
-    # --int8-mp-two-stage-mixed
-    # --int8-mp-topk 16            # top-k的k值
+    --int8-mp-two-stage-mixed
+    --int8-mp-topk 16            # top-k的k值
     --int8-mp-grad-weight
     ## FP
     # --fp8-mixed-precision-training
@@ -148,7 +148,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 
 # TENSORBOARD_ARGS="--tensorboard-dir experiments/tensorboard"
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \

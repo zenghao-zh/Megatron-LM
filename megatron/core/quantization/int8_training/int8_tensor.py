@@ -33,6 +33,22 @@ from .int8_mm import (
     scaled_int8_mm_two_stage,
 )
 
+# Lazy-loaded CUDA quant+dequant functions (compiled on first use).
+# False = load failed, None = not attempted, tuple = success.
+_cuda_quant_fns = None
+
+def _get_cuda_quant_fns():
+    """Return (quant_dequant_a, dequant_b) or None if CUDA ext unavailable."""
+    global _cuda_quant_fns
+    if _cuda_quant_fns is not None:
+        return _cuda_quant_fns if _cuda_quant_fns else None
+    try:
+        from .int8_int4_quant_cuda import quant_dequant_a_cuda, dequant_b_cuda
+        _cuda_quant_fns = (quant_dequant_a_cuda, dequant_b_cuda)
+    except Exception:
+        _cuda_quant_fns = False
+    return _cuda_quant_fns if _cuda_quant_fns else None
+
 
 aten = torch.ops.aten
 
@@ -295,30 +311,27 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
     use_two_stage_mixed = quant_method == 'two_stage_mixed'
     
     if use_two_stage_mixed:
-        # Mixed precision two-stage: INT8 for top-k, INT4 range for others
-        # Uses same matmul kernel as two_stage but with INT4 precision for others
         topk_elements = config.topk_elements if config else 16
-        
-        # Quantize A with mixed precision (top-k: INT8 [-127,127], others: INT4 range [-7,7])
-        # Returns combined tensor (unpacked) for fast matmul
-        A_i8, A_scales, A_mask = quantize_int8_int4_two_stage_groupwise(
-            A_2d, group_size, topk_elements
-        )
-        # A_i8: [M, K] INT8 tensor (topk + others combined)
-        # A_scales: [M, num_groups, 2] where [:,:,0] is scale_topk, [:,:,1] is scale_others
-        # A_mask: [M, num_groups, group_size] bool mask
-        
-        # Quantize B directly along K dimension
-        B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
-        
-        # Reshape A mask to [M, K]
-        num_groups = (K + group_size - 1) // group_size
-        A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]
-        
-        # Use standard two-stage matmul (works with combined A tensor)
-        out = scaled_int8_mm_two_stage(
-            A_i8, B_i8, A_scales, B_scales, A_mask_2d, group_size
-        )
+
+        # Fast path: CUDA quant → dequant → cuBLAS BF16 mm  (~6× faster)
+        cuda_fns = _get_cuda_quant_fns()
+        if cuda_fns is not None and K % group_size == 0:
+            quant_dequant_a, dequant_b = cuda_fns
+            A_dq = quant_dequant_a(A_2d, group_size, topk_elements)
+            B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
+            B_dq = dequant_b(B_i8, B_scales, group_size)
+            out = torch.mm(A_dq, B_dq)
+        else:
+            # Fallback: Triton quant + Triton INT8 matmul
+            A_i8, A_scales, A_mask = quantize_int8_int4_two_stage_groupwise(
+                A_2d, group_size, topk_elements
+            )
+            B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
+            num_groups = (K + group_size - 1) // group_size
+            A_mask_2d = A_mask.reshape(A_2d.shape[0], -1)[:, :K]
+            out = scaled_int8_mm_two_stage(
+                A_i8, B_i8, A_scales, B_scales, A_mask_2d, group_size
+            )
     elif use_two_stage:
         # Two-stage quantization for A (activation), standard groupwise for B (weight)
         topk_elements = config.topk_elements if config else 16

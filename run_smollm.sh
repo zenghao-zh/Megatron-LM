@@ -5,7 +5,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6003
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m-int8-fw-mlp-4gpu
+EXPERIMENT_NAME=smollm-360m-int8x4-fw-mlp-4gpu
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -131,11 +131,11 @@ DATA_ARGS=(
 
 EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
-    --save-interval 1000
+    --save-interval 5000
     --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --wandb-project megatron-training-smollm
     --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH

@@ -6,8 +6,12 @@ Quantise:
     quantize_int8_int4_cuda_compat  → (combined, scales, mask)
 
 Dequant (for the "CUDA quant → dequant → cuBLAS BF16 mm" fast-path):
-    dequant_a_cuda  → BF16 tensor  (from pre-split A_topk, A_others, scales)
-    dequant_b_cuda  → BF16 tensor  (from B_int8, B_scales)
+    dequant_a_cuda       → BF16 tensor  (from pre-split A_topk, A_others, scales)
+    dequant_b_cuda       → BF16 tensor  (from B_int8, B_scales)
+
+Fused quant+dequant (training fast-path):
+    quant_dequant_a_cuda → BF16 tensor  (A two-stage round-trip)
+    quant_dequant_b_cuda → BF16 tensor  (B groupwise round-trip, single kernel)
 """
 
 import os
@@ -162,3 +166,30 @@ def dequant_b_cuda(
     ext = _get_ext()
     sc = B_scales.to(torch.float32).contiguous()
     return ext.dequant_b(B.contiguous(), sc, group_size)
+
+
+# ── Fused quant+dequant for B (single kernel) ────────────────────────────
+
+@torch.no_grad()
+def quant_dequant_b_cuda(
+    tensor: Tensor,
+    group_size: int = 64,
+) -> Tensor:
+    """Fused groupwise INT8 quant+dequant for B in a single CUDA kernel.
+
+    Equivalent to quantize_int8_groupwise_along_k followed by dequant_b_cuda,
+    but avoids the intermediate INT8 tensor / scales allocation and the extra
+    kernel launch.  The kernel reads B twice (max-abs pass + quant-dequant pass)
+    with the second read hitting L2 cache.
+    """
+    K, N = tensor.shape
+    pad_size = (group_size - K % group_size) % group_size
+    if pad_size > 0:
+        tensor = torch.nn.functional.pad(tensor, (0, 0, 0, pad_size), value=0)
+
+    ext = _get_ext()
+    out = ext.quant_dequant_b(tensor, group_size)
+
+    if pad_size > 0:
+        out = out[:K, :]
+    return out

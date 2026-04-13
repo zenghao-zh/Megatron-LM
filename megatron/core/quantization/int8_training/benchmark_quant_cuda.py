@@ -27,6 +27,8 @@ from megatron.core.quantization.int8_training.int8_mm import (
 from megatron.core.quantization.int8_training.int8_int4_quant_cuda import (
     quantize_int8_int4_cuda_fused,
     quantize_int8_int4_cuda_compat,
+    quant_dequant_a_cuda,
+    quant_dequant_b_cuda,
 )
 
 # ---------------------------------------------------------------------------
@@ -177,9 +179,10 @@ def bench_e2e(topk_k=16, group_size=64, device="cuda", warmup=10, repeat=50):
     print(f"{'='*70}")
     print(f"  {'M':>5s} {'K':>5s} {'N':>5s}  {'BF16 mm':>9s}  "
           f"{'INT8 2stg':>10s}  {'INT8 fused':>11s}  "
-          f"{'cos(ref)':>9s}  {'cos(fused)':>11s}")
+          f"{'dq+cuBLAS':>10s}  "
+          f"{'cos(ref)':>9s}  {'cos(dq)':>8s}")
     print(f"  {'-'*5} {'-'*5} {'-'*5}  {'-'*9}  {'-'*10}  {'-'*11}  "
-          f"{'-'*9}  {'-'*11}")
+          f"{'-'*10}  {'-'*9}  {'-'*8}")
 
     for M, K, N in [(1024, 2048, 2048), (2048, 4096, 4096),
                     (4096, 4096, 4096), (4096, 8192, 4096)]:
@@ -209,8 +212,7 @@ def bench_e2e(topk_k=16, group_size=64, device="cuda", warmup=10, repeat=50):
             topk, others, a_sc = quantize_int8_int4_cuda_fused(
                 A_bf16, group_size, topk_k)
             b_i8, b_sc = quantize_int8_groupwise_along_k(B_bf16, group_size)
-            a_combined = topk + others  # combine for matmul mask path
-            # build mask from topk (non-zero positions)
+            a_combined = topk + others
             mask_2d = (topk != 0)
             return scaled_int8_mm_two_stage(
                 a_combined.to(torch.int8), b_i8, a_sc, b_sc, mask_2d, group_size)
@@ -219,9 +221,20 @@ def bench_e2e(topk_k=16, group_size=64, device="cuda", warmup=10, repeat=50):
         out_fused = run_int8_fused()
         cos_fused = _cosine_sim(ref_out, out_fused)
 
+        # ---- dequant+cuBLAS (fused CUDA for both A and B) ----
+        def run_dq_cublas():
+            A_dq = quant_dequant_a_cuda(A_bf16, group_size, topk_k)
+            B_dq = quant_dequant_b_cuda(B_bf16, group_size)
+            return torch.mm(A_dq, B_dq)
+
+        t_dq = _cuda_timer(run_dq_cublas, warmup, repeat)
+        out_dq = run_dq_cublas()
+        cos_dq = _cosine_sim(ref_out, out_dq)
+
         print(f"  {M:5d} {K:5d} {N:5d}  {t_bf16:8.0f}µ  "
               f"{t_ref_int8:9.0f}µ  {t_fused_int8:10.0f}µ  "
-              f"{cos_ref:9.6f}  {cos_fused:11.6f}")
+              f"{t_dq:9.0f}µ  "
+              f"{cos_ref:9.6f}  {cos_dq:8.6f}")
 
 
 # ---------------------------------------------------------------------------

@@ -412,6 +412,86 @@ torch::Tensor dequant_b_cuda(
     return out;
 }
 
+/* ================================================================
+ *  Fused quant+dequant for B: groupwise INT8 round-trip
+ *
+ *  Replaces the two-step (Triton quantize → CUDA dequant) pipeline
+ *  with a single CUDA kernel.  Each thread owns one column and
+ *  iterates over group_size rows twice: pass 1 finds max-abs,
+ *  pass 2 quantizes+dequants.  The second read hits L2 cache.
+ *
+ *  Grid  : (num_groups, cdiv(N, BLOCK_N))
+ *  Block : (BLOCK_N)
+ * ================================================================ */
+
+template <typename scalar_t>
+__global__ void quant_dequant_b_fused_kernel(
+        const scalar_t* __restrict__ B,
+        __nv_bfloat16*  __restrict__ B_dq,
+        int K, int N, int gs, float eps)
+{
+    const int g = blockIdx.x;
+    const int n = blockIdx.y * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+
+    const int k_start = g * gs;
+    const int k_end   = min(k_start + gs, K);
+
+    float max_abs = 0.f;
+    for (int k = k_start; k < k_end; ++k)
+        max_abs = fmaxf(max_abs, fabsf(to_float(B, k * N + n)));
+
+    float scale     = max_abs / 127.f;
+    float inv_scale = 1.f / fmaxf(scale, eps);
+
+    for (int k = k_start; k < k_end; ++k) {
+        int   idx = k * N + n;
+        float val = to_float(B, idx);
+        int   q   = __float2int_rn(val * inv_scale);
+        q = max(-127, min(127, q));
+        B_dq[idx] = __float2bfloat16((float)q * scale);
+    }
+}
+
+torch::Tensor quant_dequant_b_fused(
+        torch::Tensor B, int64_t group_size) {
+    TORCH_CHECK(B.dim() == 2, "B must be 2-D [K, N]");
+    TORCH_CHECK(B.is_cuda(), "B must be CUDA");
+    int K = B.size(0), N = B.size(1);
+    TORCH_CHECK(K % group_size == 0,
+                "K must be divisible by group_size");
+    int ng = K / group_size;
+
+    auto out = torch::empty({K, N}, torch::TensorOptions()
+                   .dtype(torch::kBFloat16).device(B.device()));
+
+    constexpr int BLOCK_N = 256;
+    dim3 grid(ng, (N + BLOCK_N - 1) / BLOCK_N);
+    dim3 block(BLOCK_N);
+    float eps = 1e-20f;
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+    auto Bc = B.contiguous();
+    auto* out_ptr = reinterpret_cast<__nv_bfloat16*>(out.data_ptr());
+
+    if (Bc.scalar_type() == torch::kBFloat16) {
+        quant_dequant_b_fused_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(Bc.data_ptr()),
+            out_ptr, K, N, (int)group_size, eps);
+    } else if (Bc.scalar_type() == torch::kFloat16) {
+        quant_dequant_b_fused_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(Bc.data_ptr()),
+            out_ptr, K, N, (int)group_size, eps);
+    } else {
+        auto f32 = Bc.to(torch::kFloat32);
+        quant_dequant_b_fused_kernel<<<grid, block, 0, stream>>>(
+            f32.data_ptr<float>(), out_ptr, K, N, (int)group_size, eps);
+    }
+
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("quantize_fused",  &quantize_fused,
           "INT8+INT4 two-stage quantize → (topk, others, scales)");
@@ -421,4 +501,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Dequant two-stage INT8 A → BF16 (single-pass)");
     m.def("dequant_b", &dequant_b_cuda,
           "Dequant group-wise INT8 B → BF16 (single-pass)");
+    m.def("quant_dequant_b", &quant_dequant_b_fused,
+          "Fused quant+dequant groupwise INT8 B → BF16 (single kernel)");
 }

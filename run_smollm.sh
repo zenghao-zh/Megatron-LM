@@ -5,7 +5,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6003
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-360m-int8x4-fw-mlp-4gpu
+EXPERIMENT_NAME=smollm-360m-act-sparse-4x-4gpu
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -76,19 +76,22 @@ TRAINING_ARGS=(
     --clip-grad 1.0
     --bf16
     ## 激活稀疏训练参数
-    # --act-sparse-training
-    # --act-sparse-predictor-hidden-size 64
-    # --act-sparse-bank-size 64
-    # --act-sparse-topk 8
-    # --act-sparse-btopk-coeff 0.001
-    # --act-sparse-swiglu-without-silu
-    --int8-mixed-precision-training
-    # --int8-mp-verbose  # 打印每个层的INT8状态
-    --int8-mp-group-size 64
-    # --int8-mp-two-stage   # 使用两阶段量化
-    --int8-mp-two-stage-mixed
-    --int8-mp-topk 16            # top-k的k值
-    --int8-mp-grad-weight
+    --act-sparse-training
+    --act-sparse-predictor-hidden-size 64
+    --act-sparse-bank-size 64
+    --act-sparse-topk 16
+    --act-sparse-btopk-coeff 0.001
+    --act-sparse-swiglu-without-silu
+
+    ## Int 8训练
+    # --int8-mixed-precision-training
+    # # --int8-mp-verbose  # 打印每个层的INT8状态
+    # # --int8-mp-group-size 64
+    # # --int8-mp-two-stage   # 使用两阶段量化 int8x8
+    # --int8-mp-two-stage-mixed # int8x4
+    # --int8-mp-topk 16            # top-k的k值
+    # --int8-mp-grad-weight
+    # --int8-mp-hadamard-rotation  
     ## FP
     # --fp8-mixed-precision-training
     # --fp8-mp-group-size 64           # groupwise量化组大小

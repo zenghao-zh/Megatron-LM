@@ -38,16 +38,31 @@ from .int8_mm import (
 _cuda_quant_fns = None
 
 def _get_cuda_quant_fns():
-    """Return (quant_dequant_a, dequant_b) or None if CUDA ext unavailable."""
+    """Return (quant_dequant_a, quant_dequant_b) or None if CUDA ext unavailable."""
     global _cuda_quant_fns
     if _cuda_quant_fns is not None:
         return _cuda_quant_fns if _cuda_quant_fns else None
     try:
-        from .int8_int4_quant_cuda import quant_dequant_a_cuda, dequant_b_cuda
-        _cuda_quant_fns = (quant_dequant_a_cuda, dequant_b_cuda)
+        from .int8_int4_quant_cuda import quant_dequant_a_cuda, quant_dequant_b_cuda
+        _cuda_quant_fns = (quant_dequant_a_cuda, quant_dequant_b_cuda)
     except Exception:
         _cuda_quant_fns = False
     return _cuda_quant_fns if _cuda_quant_fns else None
+
+
+from ..hadamard import random_hadamard_matrix, hadamard_rotate
+
+_hadamard_matrix_cache = {}
+
+def _get_hadamard_matrix(size, device, dtype):
+    """Get or create a cached random hadamard matrix (deterministic, fixed seed)."""
+    key = (size, str(device))
+    if key not in _hadamard_matrix_cache:
+        rng_state = torch.random.get_rng_state()
+        torch.manual_seed(42)
+        _hadamard_matrix_cache[key] = random_hadamard_matrix(size, device)
+        torch.random.set_rng_state(rng_state)
+    return _hadamard_matrix_cache[key].to(dtype=dtype, device=device)
 
 
 aten = torch.ops.aten
@@ -305,6 +320,12 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
     A_2d = A.reshape(-1, A.shape[-1])  # [M, K]
     K = A_2d.shape[-1]
     
+    # Apply group-wise hadamard rotation before quantization
+    if config and getattr(config, 'hadamard_rotation', False) and group_size > 0 and K % group_size == 0:
+        H = _get_hadamard_matrix(group_size, A_2d.device, A_2d.dtype)
+        A_2d = hadamard_rotate(A_2d, H)       # row-wise: each row group @ H
+        B = hadamard_rotate(B, H, dim=0)       # col-wise: H^T @ each column group
+    
     # Determine quantization method
     quant_method = config.quantization_method if config else 'groupwise'
     use_two_stage = quant_method == 'two_stage'
@@ -316,10 +337,9 @@ def _dynamic_int8_mm_groupwise(A: Tensor, B: Tensor, group_size: int = 64, confi
         # Fast path: CUDA quant → dequant → cuBLAS BF16 mm  (~6× faster)
         cuda_fns = _get_cuda_quant_fns()
         if cuda_fns is not None and K % group_size == 0:
-            quant_dequant_a, dequant_b = cuda_fns
+            quant_dequant_a, quant_dequant_b = cuda_fns
             A_dq = quant_dequant_a(A_2d, group_size, topk_elements)
-            B_i8, B_scales = quantize_int8_groupwise_along_k(B, group_size)
-            B_dq = dequant_b(B_i8, B_scales, group_size)
+            B_dq = quant_dequant_b(B, group_size)
             out = torch.mm(A_dq, B_dq)
         else:
             # Fallback: Triton quant + Triton INT8 matmul

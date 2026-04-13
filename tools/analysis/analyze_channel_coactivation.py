@@ -57,7 +57,7 @@ def parse_args():
     p.add_argument(
         "--output-dir",
         type=str,
-        default=os.path.join(os.path.dirname(__file__), "output_coactivation_group"),
+        default=os.path.join(os.path.dirname(__file__), "output_coactivation_group_balanced"),
     )
     return p.parse_args()
 

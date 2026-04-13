@@ -2289,6 +2289,10 @@ def _add_mixed_precision_args(parser):
                        '(Default: exclude lm_head for better convergence)')
     group.add_argument('--int8-mp-verbose', action='store_true',
                        help='Print detailed information about which layers have INT8 enabled/disabled.')
+    group.add_argument('--int8-mp-hadamard-rotation', action='store_true',
+                       help='Apply block-diagonal random Hadamard rotation within each quantization '
+                       'group before quantizing. Smooths outliers to reduce quantization error. '
+                       'Only effective when group_size > 0. (Default: disabled)')
     group.add_argument('--int8-mp-enable-backward-at-iter', type=int, default=None,
                        help='Enable INT8 backward (grad_input and grad_weight) at specified iteration. '
                        'Before this iteration, only forward (output) uses INT8. '

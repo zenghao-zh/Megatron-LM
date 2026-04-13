@@ -41,6 +41,9 @@ class Int8MixedPrecisionTrainingConfig:
         topk_elements: Number of top-k elements per group for two-stage quantization (default: 16)
             Only used when quantization_method='two_stage' or 'two_stage_mixed'.
             For group_size=64, topk_elements=16 means top 25% outliers get their own scale.
+        hadamard_rotation: Apply group-wise random hadamard rotation before quantization (default: False)
+            Spreads outliers across each group to reduce quantization error.
+            Uses a cached 64x64 random hadamard matrix (deterministic seed for cross-rank consistency).
     """
     output: bool = True
     grad_input: bool = True
@@ -48,6 +51,7 @@ class Int8MixedPrecisionTrainingConfig:
     group_size: int = 64  # Default 64 for TP compatibility
     quantization_method: str = 'groupwise'  # 'groupwise', 'two_stage', or 'two_stage_mixed'
     topk_elements: int = 16  # Number of top-k elements for two-stage quantization
+    hadamard_rotation: bool = False
     
     def __repr__(self):
         return (
@@ -57,6 +61,7 @@ class Int8MixedPrecisionTrainingConfig:
             f"grad_weight={self.grad_weight}, "
             f"group_size={self.group_size}, "
             f"quantization_method={self.quantization_method}, "
-            f"topk_elements={self.topk_elements})"
+            f"topk_elements={self.topk_elements}, "
+            f"hadamard_rotation={self.hadamard_rotation})"
         )
 

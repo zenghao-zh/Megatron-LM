@@ -82,7 +82,7 @@ TRAINING_ARGS=(
     --act-sparse-topk 16
     --act-sparse-btopk-coeff 0.001
     --act-sparse-swiglu-without-silu
-    --act-sparse-bias-threshold 0
+    # --act-sparse-bias-threshold 0
     # --int8-mixed-precision-training
     # --int8-mp-verbose  # 打印每个层的INT8状态
     # --no-int8-mp-grad-input

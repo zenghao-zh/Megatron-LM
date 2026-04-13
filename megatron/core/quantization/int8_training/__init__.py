@@ -790,6 +790,7 @@ def apply_int8_training_from_args(model, args):
     else:
         quantization_method = 'groupwise'  # Standard single-stage
     topk_elements = getattr(args, 'int8_mp_topk', 16)
+    hadamard_rotation = getattr(args, 'int8_mp_hadamard_rotation', False)
     
     if enable_backward_at_iter is not None and current_iteration < enable_backward_at_iter:
         # Start with only forward INT8, backward will be enabled later
@@ -800,6 +801,7 @@ def apply_int8_training_from_args(model, args):
             group_size=getattr(args, 'int8_mp_group_size', 64),
             quantization_method=quantization_method,
             topk_elements=topk_elements,
+            hadamard_rotation=hadamard_rotation,
         )
         print_rank_0(f'  INT8 backward will be enabled at iteration {enable_backward_at_iter}')
     elif enable_backward_at_iter is not None and current_iteration >= enable_backward_at_iter:
@@ -811,6 +813,7 @@ def apply_int8_training_from_args(model, args):
             group_size=getattr(args, 'int8_mp_group_size', 64),
             quantization_method=quantization_method,
             topk_elements=topk_elements,
+            hadamard_rotation=hadamard_rotation,
         )
         print_rank_0(f'  INT8 backward already enabled (resumed at iteration {current_iteration} >= {enable_backward_at_iter})')
     else:
@@ -822,6 +825,7 @@ def apply_int8_training_from_args(model, args):
             group_size=getattr(args, 'int8_mp_group_size', 64),
             quantization_method=quantization_method,
             topk_elements=topk_elements,
+            hadamard_rotation=hadamard_rotation,
         )
     
     # Print quantization method info
@@ -831,6 +835,8 @@ def apply_int8_training_from_args(model, args):
         print_rank_0(f'  Using two-stage quantization: top-{topk_elements} outliers per group')
     else:
         print_rank_0(f'  Using standard group-wise quantization')
+    if hadamard_rotation:
+        print_rank_0(f'  Hadamard rotation enabled (block-diagonal, group_size={getattr(args, "int8_mp_group_size", 64)})')
     
     # Use default filter to exclude lm_head unless user explicitly wants all layers
     filter_fn = None

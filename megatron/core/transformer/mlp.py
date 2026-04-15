@@ -125,20 +125,71 @@ class BalancedTopkModule(MegatronModule):
         self.tp_rank = tp_rank
         self.act_sparse_enable_fused_balanced_topk = getattr(config, 'act_sparse_enable_fused_balanced_topk', False)
 
-    
+        gamma = getattr(config, 'act_sparse_affinity_bias', 0.0)
+        if gamma > 0:
+            C = self.hidden_size_per_partition
+            self.num_clusters = self.bank_size // self.topk
+            self.register_buffer('cluster_assign', torch.zeros(C, dtype=torch.long), persistent=False)
+            self.register_buffer('coact_ema', torch.zeros(C, C, dtype=torch.float32), persistent=False)
+            self.register_buffer('batch_coact', torch.zeros(C, C, dtype=torch.float32), persistent=False)
+            self.affinity_active = False
+            self._accumulate_coact = False
+
     def forward(self, x, k = None):
 
-        # 确保输入张量的最后一个维度与分片后的 hidden_size 匹配
         if x.shape[-1] != self.hidden_size_per_partition:
             raise ValueError(f"Expected input hidden size {self.hidden_size_per_partition} "
                            f"but got {x.shape[-1]} for TP rank {self.tp_rank}")
-        
-        mask = BalancedTopkFunction.apply(x, self.topk if k is None else k, 
-                    self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training)
-        
-            
 
-        return mask, self.num_assigned_tokens
+        gamma_init = getattr(self.config, 'act_sparse_affinity_bias', 0.0)
+
+        if gamma_init > 0 and self.training and getattr(self, 'affinity_active', False):
+            gamma_max = getattr(self.config, 'act_sparse_affinity_bias_max', 0.0)
+            if gamma_max > gamma_init:
+                start_step = getattr(self.config, 'act_sparse_affinity_start_step', 0)
+                total_steps = getattr(self, '_total_steps', 150000)
+                cur_iter = getattr(self, '_current_iteration', start_step)
+                progress = min((cur_iter - start_step) / max(total_steps - start_step, 1), 1.0)
+                gamma = gamma_init + (gamma_max - gamma_init) * progress
+            else:
+                gamma = gamma_init
+
+            C = self.hidden_size_per_partition
+            K = self.num_clusters
+            x_flat = x.reshape(-1, C)
+
+            cluster_oh = torch.nn.functional.one_hot(
+                self.cluster_assign, K
+            ).to(x.dtype)                                     # (C, K)
+            g = x_flat @ cluster_oh                            # (T, K)
+            preferred = g.argmax(dim=-1)                       # (T,)
+            pref_oh = torch.nn.functional.one_hot(
+                preferred, K
+            ).to(x.dtype)                                      # (T, K)
+            same_mask = pref_oh @ cluster_oh.T                 # (T, C) — 1 if same cluster
+            affinity = (same_mask * (2.0 * gamma) - gamma)     # +gamma / -gamma
+
+            x_scored = x + affinity.view_as(x)
+
+            scored_output = BalancedTopkFunction.apply(
+                x_scored, self.topk if k is None else k,
+                self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training
+            )
+            binary_mask = (scored_output != 0)
+            output = x * binary_mask.to(x.dtype)
+
+            if getattr(self, '_accumulate_coact', False):
+                with torch.no_grad():
+                    binary = binary_mask.reshape(-1, C).to(torch.float32)
+                    self.batch_coact = self.batch_coact.float()
+                    self.batch_coact.addmm_(binary.T, binary)
+        else:
+            output = BalancedTopkFunction.apply(
+                x, self.topk if k is None else k,
+                self.bank_size, self.balanced_bias, self.num_assigned_tokens, self.training
+            )
+
+        return output, self.num_assigned_tokens
 
     def reset_num_assigned_tokens(self):
         self.num_assigned_tokens.zero_()

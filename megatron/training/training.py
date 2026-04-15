@@ -1547,6 +1547,116 @@ def update_balanced_bias(model, u=0.001, bias_threshold=-1.0):
 
     return max_violation/len(modules_to_update)
 
+
+def _prepare_coact_accumulation(model, iteration, start_step, cluster_interval,
+                                total_steps=150000):
+    """Called BEFORE forward. Sets accumulation flag and current iteration on modules."""
+    for model_chunk in model:
+        modules = []
+        collect_topk_modules(model_chunk, modules)
+        for module in modules:
+            if not hasattr(module, 'batch_coact'):
+                continue
+            module._current_iteration = iteration
+            module._total_steps = total_steps
+            if iteration < start_step:
+                continue
+            if not module.affinity_active:
+                module.affinity_active = True
+                module._last_block_diag_ratio = 0.0
+                print_rank_last(
+                    f"[Affinity Bias] Activated at step {iteration}. "
+                    f"num_clusters={module.num_clusters} "
+                    f"(bank_size/topk = {module.bank_size}//{module.topk})"
+                )
+            steps_since_start = iteration - start_step
+            if steps_since_start > 0 and steps_since_start % cluster_interval == 0:
+                module._accumulate_coact = True
+                module.batch_coact.zero_()
+
+
+def update_cluster_assignments(model, iteration, start_step=0,
+                               cluster_interval=100, ema_decay=0.95):
+    """Run spectral clustering on accumulated coactivation data.
+
+    Called AFTER forward. Only does work on clustering steps.
+    Returns average block_diag_ratio, or cached value on non-clustering steps.
+    """
+    modules = []
+    collect_topk_modules(model, modules)
+    modules_with_coact = [m for m in modules if hasattr(m, 'batch_coact')]
+    if not modules_with_coact:
+        return None
+
+    if not any(m._accumulate_coact for m in modules_with_coact):
+        return getattr(modules_with_coact[0], '_last_block_diag_ratio', 0.0)
+
+    for module in modules_with_coact:
+        module._accumulate_coact = False
+
+    from scipy.cluster.vq import kmeans2
+    import numpy as np
+
+    expert_dp_group = parallel_state.get_expert_data_parallel_group()
+
+    ratios = []
+    for idx, module in enumerate(modules_with_coact):
+        batch_coact = module.batch_coact.float()
+        num_clusters = module.num_clusters
+
+        if expert_dp_group.size() > 1:
+            torch.distributed.all_reduce(
+                batch_coact, op=torch.distributed.ReduceOp.SUM, group=expert_dp_group
+            )
+
+        module.coact_ema = module.coact_ema.float()
+        module.coact_ema.mul_(ema_decay).add_(batch_coact, alpha=1.0 - ema_decay)
+
+        coact = module.coact_ema
+        diag = coact.diag()
+        union = diag.unsqueeze(0) + diag.unsqueeze(1) - coact
+        jaccard = coact / union.clamp(min=1)
+        jaccard.fill_diagonal_(0)
+
+        eigenvalues, eigenvectors = torch.linalg.eigh(jaccard.float())
+        top_vecs = eigenvectors[:, -num_clusters:]
+
+        norms = top_vecs.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        embedding = (top_vecs / norms).cpu().numpy()
+
+        np.random.seed(iteration)
+        _, labels = kmeans2(embedding, num_clusters, minit='++', iter=20)
+
+        module.cluster_assign.copy_(
+            torch.from_numpy(labels).to(module.cluster_assign.device)
+        )
+
+        module.batch_coact.zero_()
+
+        total = coact.sum().item()
+        if total > 0:
+            within = sum(
+                coact[module.cluster_assign == k][:, module.cluster_assign == k].sum().item()
+                for k in range(num_clusters)
+            )
+            q = within / total
+        else:
+            q = 0.0
+        ratios.append(q)
+
+        labels_np = module.cluster_assign.cpu().numpy()
+        sizes = [int((labels_np == k).sum()) for k in range(num_clusters)]
+        print_rank_last(
+            f"[Affinity Bias] step={iteration} layer={idx} "
+            f"cluster_sizes={sizes} block_diag_ratio={q:.4f}"
+        )
+
+    avg_ratio = sum(ratios) / len(ratios) if ratios else 0.0
+    for module in modules_with_coact:
+        module._last_block_diag_ratio = avg_ratio
+    return avg_ratio
+
+
 def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
     """Single training step."""
     args = get_args()
@@ -1564,6 +1674,12 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
         # Collect garbage and empty unused memory.
         gc.collect()
         torch.cuda.empty_cache()
+
+    if config.act_sparse_training and config.act_sparse_affinity_bias > 0:
+        _prepare_coact_accumulation(model, args.curr_iteration,
+                                    config.act_sparse_affinity_start_step,
+                                    config.act_sparse_affinity_cluster_interval,
+                                    total_steps=args.train_iters or 150000)
 
     rerun_state_machine = get_rerun_state_machine()
     while rerun_state_machine.should_run_forward_backward(data_iterator):
@@ -1623,6 +1739,16 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             )
         # print_rank_0(f"mean_max_violation: {mean_max_violation}")
 
+    # Update cluster assignments for group affinity bias
+    block_diag_ratio = None
+    if config.act_sparse_training and config.act_sparse_affinity_bias > 0:
+        for model_chunk in model:
+            block_diag_ratio = update_cluster_assignments(
+                model_chunk,
+                iteration=args.curr_iteration,
+                start_step=config.act_sparse_affinity_start_step,
+                cluster_interval=config.act_sparse_affinity_cluster_interval,
+            )
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
     # so we must gather across mp ranks
@@ -1699,8 +1825,9 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             grad_norm,
             num_zeros_in_grad,
             mean_max_violation,
+            block_diag_ratio,
         )
-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, mean_max_violation
+    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, mean_max_violation, block_diag_ratio
 
 
 def training_log(
@@ -1716,6 +1843,7 @@ def training_log(
     params_norm,
     num_zeros_in_grad,
     mean_max_violation,
+    block_diag_ratio=None,
 ):
     """Log training information such as losses, timing, ...."""
     args = get_args()
@@ -1847,6 +1975,11 @@ def training_log(
             writer.add_scalar('mean-max-violation vs samples', mean_max_violation, args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'mean-max-violation': mean_max_violation}, iteration)
+        if block_diag_ratio is not None:
+            writer.add_scalar('block-diag-ratio', block_diag_ratio, iteration)
+            writer.add_scalar('block-diag-ratio vs samples', block_diag_ratio, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'block-diag-ratio': block_diag_ratio}, iteration)
 
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
@@ -1882,11 +2015,10 @@ def training_log(
             moe_layer_freq=args.moe_layer_freq,
         )
     if args.act_sparse_training and args.num_experts is None:
-        # Track predictor loss for activation sparse training (non-MoE case)
-        loss_scale = 1 / get_num_microbatches()
+        act_sparse_loss_scale = 1 / get_num_microbatches()
         track_names = ["predictor_loss"]
         track_moe_metrics(
-            loss_scale=loss_scale,
+            loss_scale=act_sparse_loss_scale,
             iteration=iteration,
             writer=writer,
             wandb_writer=wandb_writer,
@@ -1978,6 +2110,17 @@ def training_log(
             log_string += f' params norm: {params_norm:.3f} |'
         if mean_max_violation is not None:
             log_string += f' mean max violation: {mean_max_violation:.3f} |'
+        if block_diag_ratio is not None:
+            gamma_init = args.act_sparse_affinity_bias
+            gamma_max = getattr(args, 'act_sparse_affinity_bias_max', 0.0)
+            if gamma_max > gamma_init:
+                start_step = args.act_sparse_affinity_start_step
+                total_steps = args.train_iters or 150000
+                progress = min((iteration - start_step) / max(total_steps - start_step, 1), 1.0)
+                cur_gamma = gamma_init + (gamma_max - gamma_init) * progress
+            else:
+                cur_gamma = gamma_init
+            log_string += f' block diag ratio: {block_diag_ratio:.4f} | gamma: {cur_gamma:.4f} |'
         log_string += ' number of skipped iterations: {:3d} |'.format(
             total_loss_dict[skipped_iters_key]
         )
@@ -2625,6 +2768,7 @@ def train(
             grad_norm,
             num_zeros_in_grad,
             mean_max_violation,
+            block_diag_ratio,
         ) = train_step(
             forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config
         )
@@ -2706,6 +2850,7 @@ def train(
             params_norm,
             num_zeros_in_grad,
             mean_max_violation,
+            block_diag_ratio,
         )
 
         # Evaluation.

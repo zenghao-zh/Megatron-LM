@@ -218,6 +218,19 @@ class TransformerConfig(ModelParallelConfig):
     act_sparse_enable_parallel_compute: bool = False
     """Whether to use parallel compute for balanced topk and fc1_linear."""
 
+    act_sparse_affinity_bias: float = 0.0
+    """Initial gamma for group affinity bias. 0 = disabled."""
+
+    act_sparse_affinity_bias_max: float = 0.0
+    """Max gamma. If > affinity_bias, gamma linearly ramps from bias to bias_max
+    over (train_steps - start_step). If 0 or == affinity_bias, gamma is constant."""
+
+    act_sparse_affinity_start_step: int = 0
+    """Training step at which to activate affinity bias."""
+
+    act_sparse_affinity_cluster_interval: int = 100
+    """How often (in steps) to run spectral clustering and update cluster assignments."""
+
     use_coe_layer: bool = False
     """Whether to use chain of experts (coe) layer to replace moe layer."""
 

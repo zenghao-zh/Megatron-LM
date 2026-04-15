@@ -1,11 +1,11 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 MASTER_ADDR=localhost
 MASTER_PORT=6002
 NNODES=1
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
-EXPERIMENT_NAME=smollm-130m-btopk-000
+EXPERIMENT_NAME=smollm-130m-btopk
 # DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 CHECKPOINT_PATH=/root/data/megatron-models/checkpoints/$EXPERIMENT_NAME
 # VOCAB_FILE=vocab.json
@@ -82,6 +82,10 @@ TRAINING_ARGS=(
     --act-sparse-topk 16
     --act-sparse-btopk-coeff 0.001
     --act-sparse-swiglu-without-silu
+    --act-sparse-affinity-bias 0.01
+    --act-sparse-affinity-bias-max 0.1
+    --act-sparse-affinity-start-step 0
+    --act-sparse-affinity-cluster-interval 200
     # --act-sparse-bias-threshold 0
     # --int8-mixed-precision-training
     # --int8-mp-verbose  # 打印每个层的INT8状态
@@ -137,7 +141,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 
 # TENSORBOARD_ARGS="--tensorboard-dir experiments/tensorboard"
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \

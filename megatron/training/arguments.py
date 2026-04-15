@@ -2925,6 +2925,17 @@ def _add_moe_args(parser):
                             '<0 = bidirectional adjustment toward mean (default); '
                             '0 = only rescue completely dead experts (assigned==0); '
                             '>0 = rescue experts below this fraction of mean (e.g. 0.05 = 5%%).')
+    group.add_argument('--act-sparse-affinity-bias', type=float, default=0.0,
+                       help='Gamma for group affinity bias. 0=disabled.')
+    group.add_argument('--act-sparse-affinity-bias-max', type=float, default=0.0,
+                       help='Max gamma for linear warmup. If 0 or == affinity-bias, '
+                            'gamma stays constant.')
+    group.add_argument('--act-sparse-affinity-start-step', type=int, default=0,
+                       help='Start affinity bias at this training step. '
+                            'Before this step the mechanism is completely inactive.')
+    group.add_argument('--act-sparse-affinity-cluster-interval', type=int, default=100,
+                       help='Run spectral clustering every N steps. '
+                            'batch_coact accumulates between updates. Default: 100.')
     
     return parser
 

@@ -1,6 +1,6 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-GPUS_PER_NODE=4
+GPUS_PER_NODE=8
 MASTER_ADDR=localhost
 MASTER_PORT=6003
 NNODES=1
@@ -15,7 +15,7 @@ TOKENIZER_MODEL=/root/data/cosmo2-tokenizer
 WANDB_PATH=/root/workspace/Megatron-LM/wandb
 TENSORBOARD_PATH=/root/workspace/Megatron-LM/tensorboard
 
-MAX_TRAIN_SAMPLES=50000000
+MAX_TRAIN_SAMPLES=12500000
 LR_WARMUP_SAMPLES=$(( 1000 * 2048 ))
 
 
@@ -29,8 +29,8 @@ DISTRIBUTED_ARGS=(
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 2048
-    --max-position-embeddings 2048
+    --seq-length 8192
+    --max-position-embeddings 8192
     --num-layers 32
     --hidden-size 960
     --num-attention-heads 15
@@ -59,7 +59,7 @@ MODEL_ARGS=(
 
 TRAINING_ARGS=(
     --seed 3407
-    --micro-batch-size 16
+    --micro-batch-size 4
     --global-batch-size 512
     --lr 3e-3
     --train-samples $MAX_TRAIN_SAMPLES
@@ -76,12 +76,21 @@ TRAINING_ARGS=(
     --clip-grad 1.0
     --bf16
     ## 激活稀疏训练参数
-    --act-sparse-training
-    --act-sparse-predictor-hidden-size 64
-    --act-sparse-bank-size 64
-    --act-sparse-topk 16
-    --act-sparse-btopk-coeff 0.001
-    --act-sparse-swiglu-without-silu
+    # --act-sparse-training
+    # --act-sparse-predictor-hidden-size 64
+    # --act-sparse-bank-size 64
+    # --act-sparse-topk 16
+    # --act-sparse-btopk-coeff 0.001
+    # 能量保持版稀疏 SwiGLU:
+    # 1) 保留原始 SiLU(gate) * up 的数值路径
+    # 2) predictor sigmoid 先做 balanced top-k，得到 p * mask
+    # 3) 对 sparse gate 整体做 RMSNorm 后再乘到 SwiGLU 激活上，不做额外能量校准
+    # 4) 前 2000 步 gate 从 dense identity 过渡到 sparse gate，top-k 从 64 过渡到 16
+    # --act-sparse-energy-preserving-swiglu
+    # --act-sparse-swiglu-gate-warmup-steps 10000
+    # --act-sparse-topk-warmup-steps 20000
+    # 旧实验路径：去掉 SiLU，用 predictor 替代 SwiGLU gate；和上面的能量保持路径互斥
+    # --act-sparse-swiglu-without-silu
 
     ## Int 8训练
     # --int8-mixed-precision-training
@@ -138,7 +147,7 @@ EVAL_AND_LOGGING_ARGS=(
     --eval-interval 5000
     --eval-iters 1
     --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH
     --wandb-project megatron-training-smollm
     --wandb-exp-name $EXPERIMENT_NAME
     --wandb-save-dir $WANDB_PATH
@@ -151,7 +160,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 
 # TENSORBOARD_ARGS="--tensorboard-dir experiments/tensorboard"
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \

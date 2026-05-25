@@ -1468,6 +1468,12 @@ def collect_btopk_mlp_modules(module, modules_to_update):
         if len(list(child.children())) > 0:
             collect_btopk_mlp_modules(child, modules_to_update)
 
+def set_btopk_mlp_iteration(module, iteration):
+    modules_to_update = []
+    collect_btopk_mlp_modules(module, modules_to_update)
+    for btopk_mlp in modules_to_update:
+        btopk_mlp._current_iteration = iteration
+
 def update_balanced_bias(model, u=0.001, bias_threshold=-1.0):
     max_violation = 0
     modules_to_update = []
@@ -1680,6 +1686,10 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
                                     config.act_sparse_affinity_start_step,
                                     config.act_sparse_affinity_cluster_interval,
                                     total_steps=args.train_iters or 150000)
+
+    if config.act_sparse_training and getattr(config, 'act_sparse_energy_preserving_swiglu', False):
+        for model_chunk in model:
+            set_btopk_mlp_iteration(model_chunk, args.curr_iteration)
 
     rerun_state_machine = get_rerun_state_machine()
     while rerun_state_machine.should_run_forward_backward(data_iterator):

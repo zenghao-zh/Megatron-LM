@@ -425,6 +425,23 @@ def validate_args(args, defaults={}):
     if args.expert_tensor_parallel_size is None:
         args.expert_tensor_parallel_size = args.tensor_model_parallel_size
 
+    if args.act_sparse_energy_preserving_swiglu:
+        assert args.act_sparse_training, \
+            '--act-sparse-energy-preserving-swiglu requires --act-sparse-training'
+        assert args.swiglu, \
+            '--act-sparse-energy-preserving-swiglu requires --swiglu'
+        assert not args.act_sparse_swiglu_without_silu, \
+            '--act-sparse-energy-preserving-swiglu cannot be used with --act-sparse-swiglu-without-silu'
+        assert args.num_experts is None, \
+            '--act-sparse-energy-preserving-swiglu currently supports dense MLP only'
+    assert args.act_sparse_swiglu_gate_warmup_steps >= 0, \
+        '--act-sparse-swiglu-gate-warmup-steps must be non-negative'
+    assert args.act_sparse_topk_warmup_steps >= 0, \
+        '--act-sparse-topk-warmup-steps must be non-negative'
+    if args.act_sparse_swiglu_gate_warmup_steps > 0 or args.act_sparse_topk_warmup_steps > 0:
+        assert args.act_sparse_energy_preserving_swiglu, \
+            'act sparse warmup steps require --act-sparse-energy-preserving-swiglu'
+
     # Deprecated arguments.
     assert args.batch_size is None, '--batch-size argument is no longer ' \
         'valid, use --micro-batch-size instead'
@@ -2920,6 +2937,16 @@ def _add_moe_args(parser):
                        help='The topk of the act sparse training for each bank.')
     group.add_argument('--act-sparse-btopk-coeff', type=float, default=0.001,
                        help='The coefficient of the act sparse training for each bank.')
+    group.add_argument('--act-sparse-energy-preserving-swiglu', action='store_true', default=False,
+                       help='For dense activation sparse SwiGLU, keep the original SiLU value path, '
+                            'apply balanced top-k to the predictor sigmoid gate, then RMS-normalize '
+                            'the sparse gate before down projection.')
+    group.add_argument('--act-sparse-swiglu-gate-warmup-steps', type=int, default=0,
+                       help='For energy-preserving sparse SwiGLU, linearly ramp gate strength '
+                            'from dense identity to the sparse RMS-normalized gate over N steps.')
+    group.add_argument('--act-sparse-topk-warmup-steps', type=int, default=0,
+                       help='For energy-preserving sparse SwiGLU, linearly ramp top-k from bank size '
+                            'down to --act-sparse-topk over N steps.')
     group.add_argument('--act-sparse-bias-threshold', type=float, default=-1.0,
                        help='Controls balanced bias update: '
                             '<0 = bidirectional adjustment toward mean (default); '

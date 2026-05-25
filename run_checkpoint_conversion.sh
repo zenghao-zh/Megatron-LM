@@ -7,9 +7,9 @@ set -e
 set -x
 
 # 定义参数
-EXPERIMENT_NAME=smollm-360m-int8x4-fw-mlp-4gpu
-LOAD_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/iter_0097656"
-SAVE_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/hf_smollm_iter_0097656_int8x4_mlp_oproj"
+EXPERIMENT_NAME=smollm-360m-8k
+LOAD_PATH="/root/data/megatron-models/checkpoints/smollm-360m-act-sparse-4x-4gpu/iter_0020000"
+SAVE_PATH="/root/data/megatron-models/checkpoints/${EXPERIMENT_NAME}/hf_smollm_iter_0020000_8k"
 
 # /root/data/megatron-models/checkpoints/smollm-360m-int8x4-fw-mlp-4gpu/iter_0097656
 # EXPERIMENT_NAME=smollm-130m

@@ -206,6 +206,15 @@ class TransformerConfig(ModelParallelConfig):
     act_sparse_btopk_coeff: float = 0.001
     """The coefficient of the act sparse training for each bank."""
 
+    act_sparse_energy_preserving_swiglu: bool = False
+    """Whether to preserve SwiGLU value path and RMS-normalize the sparse predictor gate."""
+
+    act_sparse_swiglu_gate_warmup_steps: int = 0
+    """Steps to ramp sparse SwiGLU gate strength from dense identity to sparse gate."""
+
+    act_sparse_topk_warmup_steps: int = 0
+    """Steps to ramp activation sparse top-k from bank size down to act_sparse_topk."""
+
     act_sparse_bias_threshold: float = -1.0
     """Controls balanced bias update behavior:
       < 0: bidirectional adjustment toward the mean (default);

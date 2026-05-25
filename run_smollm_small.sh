@@ -29,8 +29,8 @@ DISTRIBUTED_ARGS=(
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 2048
-    --max-position-embeddings 2048
+    --seq-length 8192
+    --max-position-embeddings 8192
     --num-layers 30
     --hidden-size 576
     --num-attention-heads 9
@@ -82,10 +82,10 @@ TRAINING_ARGS=(
     --act-sparse-topk 16
     --act-sparse-btopk-coeff 0.001
     --act-sparse-swiglu-without-silu
-    --act-sparse-affinity-bias 0.01
-    --act-sparse-affinity-bias-max 0.1
-    --act-sparse-affinity-start-step 0
-    --act-sparse-affinity-cluster-interval 200
+    # --act-sparse-affinity-bias 0.01
+    # --act-sparse-affinity-bias-max 0.1
+    # --act-sparse-affinity-start-step 0
+    # --act-sparse-affinity-cluster-interval 200
     # --act-sparse-bias-threshold 0
     # --int8-mixed-precision-training
     # --int8-mp-verbose  # 打印每个层的INT8状态

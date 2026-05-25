@@ -38,6 +38,27 @@ except ImportError:
     HAVE_TE = False
 
 
+def _rms_normalize_last_dim(tensor: torch.Tensor, eps: float) -> torch.Tensor:
+    """RMS-normalize a gate over the local FFN hidden dimension."""
+    rms = torch.sqrt(tensor.float().pow(2).mean(dim=-1, keepdim=True) + eps)
+    return tensor / rms.to(dtype=tensor.dtype)
+
+
+def _linear_warmup_progress(current_iteration: int, warmup_steps: int) -> float:
+    """Return linear warmup progress in [0, 1]."""
+    if warmup_steps <= 0:
+        return 1.0
+    return min(max(float(current_iteration) / float(warmup_steps), 0.0), 1.0)
+
+
+def _scheduled_topk(target_topk: int, bank_size: int, progress: float) -> int:
+    """Linearly ramp top-k from bank size down to the target top-k."""
+    target_topk = max(1, min(target_topk, bank_size))
+    progress = min(max(progress, 0.0), 1.0)
+    scheduled = bank_size + (target_topk - bank_size) * progress
+    return max(target_topk, min(bank_size, int(round(scheduled))))
+
+
 # pylint: disable=missing-class-docstring
 @dataclass
 class MLPSubmodules:
@@ -423,8 +444,32 @@ class BalancedTopkMLP(MegatronModule):
 
             intermediate_parallel = intermediate_parallel * TopKFunction.apply(target, self.topk_module.topk, self.topk_module.bank_size)
         else: 
-            pred_mask = torch.sigmoid(self.predictor(hidden_states)[0])
-            topk_mask, *_ = self.topk_module(pred_mask)
+            pred_logits = self.predictor(hidden_states)[0]
+            pred_mask = torch.sigmoid(pred_logits)
+            if self.config.act_sparse_energy_preserving_swiglu:
+                current_iteration = getattr(self, '_current_iteration', 0)
+                topk_progress = _linear_warmup_progress(
+                    current_iteration,
+                    self.config.act_sparse_topk_warmup_steps,
+                )
+                gate_progress = _linear_warmup_progress(
+                    current_iteration,
+                    self.config.act_sparse_swiglu_gate_warmup_steps,
+                )
+                scheduled_topk = _scheduled_topk(
+                    self.topk_module.topk,
+                    self.topk_module.bank_size,
+                    topk_progress,
+                )
+                topk_mask, *_ = self.topk_module(pred_mask, k=scheduled_topk)
+                topk_mask = _rms_normalize_last_dim(
+                    topk_mask,
+                    self.config.layernorm_epsilon,
+                )
+                if gate_progress < 1.0:
+                    topk_mask = 1.0 + gate_progress * (topk_mask - 1.0)
+            else:
+                topk_mask, *_ = self.topk_module(pred_mask)
             intermediate_parallel = intermediate_parallel * topk_mask
 
             # gate_proj, up_proj = torch.chunk(intermediate_parallel, 2, -1)
